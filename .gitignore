@@ -1,0 +1,25 @@
+# 本机配置与数据，永远不要提交
+config.json
+sessions/
+vendor/
+portable/
+shots/
+*.wav
+*.mp3
+*.m4a
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+tools/node_modules/
+tools/ruffpy/
+node_modules/
+__pycache__/
+commit-msg.txt

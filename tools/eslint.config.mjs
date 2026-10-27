@@ -1,0 +1,56 @@
+import js from '@eslint/js';
+
+export default [
+  {
+    files: ['app.js', 'emotion-ball/js/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        navigator: 'readonly',
+        location: 'readonly',
+        localStorage: 'readonly',
+        performance: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        requestAnimationFrame: 'readonly',
+        AbortController: 'readonly',
+        Event: 'readonly',
+        getComputedStyle: 'readonly',
+        getSelection: 'readonly',
+        CustomEvent: 'readonly',
+        FileReader: 'readonly',
+        Image: 'readonly',
+        URL: 'readonly',
+        Blob: 'readonly',
+        AudioContext: 'readonly',
+        MediaRecorder: 'readonly',
+        Intl: 'readonly',
+        EmotionBall: 'readonly',
+      },
+    },
+    rules: {
+      ...js.configs.recommended.rules,
+      // 这两条最值钱：未声明的变量、没用到的变量
+      'no-undef': 'error',
+      'no-unused-vars': ['warn', { args: 'none', caughtErrors: 'none' }],
+      'no-redeclare': 'error',
+      'no-dupe-keys': 'error',
+      'no-dupe-args': 'error',
+      'no-func-assign': 'error',
+      'no-unreachable': 'error',
+      'no-constant-condition': ['warn', { checkLoops: false }],
+      'no-empty': ['warn', { allowEmptyCatch: true }],
+      'no-prototype-builtins': 'off',
+    },
+  },
+  {
+    ignores: ['tools/**', 'portable/**', 'vendor/**', 'node_modules/**', 'emotion-ball/js/*.min.js'],
+  },
+];
