@@ -3786,9 +3786,9 @@
     setTimeout(() => {
       const now = Date.now();
       jobs.unshift(
-        { id: now + 3, title: '信息检索', status: 'running', detail: '整理讲稿和笔记…', ts: now },
-        { id: now + 2, title: '信息检索', status: 'running', detail: '保存转写稿…', ts: now },
-        { id: now + 1, title: '学术写作', status: 'running', detail: '补识别 3 段…', ts: now },
+        { id: now + 3, title: '示例课程 A', status: 'running', detail: '整理讲稿和笔记…', ts: now },
+        { id: now + 2, title: '示例课程 A', status: 'running', detail: '保存转写稿…', ts: now },
+        { id: now + 1, title: '示例课程 B', status: 'running', detail: '补识别 3 段…', ts: now },
       );
       renderJobs();
       const b = document.getElementById('railJobs');
