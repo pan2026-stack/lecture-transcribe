@@ -1491,6 +1491,22 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         self._log_line(f"GET  {self.path}  from {self.client_address[0]}")
         route = self.path.split("?")[0]
+        if route == "/api/watchdog":
+            cfg = load_config()
+            now = time.time()
+            return self._json(200, {
+                "enabled": bool(cfg.get("watchdog_restart", True)),
+                "strict": bool(cfg.get("watchdog_strict", False)),
+                "fails": WATCHDOG["fails"],
+                "last_check": WATCHDOG["last_check"],
+                "last_alive": WATCHDOG["last_alive"],
+                "since_check": round(now - WATCHDOG["last_check"], 1) if WATCHDOG["last_check"] else None,
+                "idle_for": round(now - LAST_ACTIVITY[0], 1),
+                "interval": float(os.environ.get("DICT_PROBE_SECONDS", "45")),
+                "threshold": int(os.environ.get("DICT_PROBE_FAILS", "3")),
+                "pid": os.getpid(),
+            })
+
         if route == "/api/notes-progress":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             job = (qs.get("job") or [""])[0]

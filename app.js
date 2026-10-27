@@ -2941,6 +2941,24 @@
     });
   }
 
+  // diag 面板：每 5 秒拉一次看门狗状态
+  function pollWatchdogForDiag() {
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/watchdog');
+        const d = await res.json();
+        const state = d.enabled ? (d.strict ? '严格' : '宽松') : '关闭';
+        const last = d.last_check ? `${Math.round(d.since_check)}s 前` : '还没探过';
+        window.__watchdogText = `${state} · 失败 ${d.fails}/${d.threshold} · 上次 ${last} · `
+          + `空闲 ${Math.round(d.idle_for)}s · 间隔 ${Math.round(d.interval)}s · PID ${d.pid}`;
+      } catch (_) {
+        window.__watchdogText = '查询失败';
+      }
+    };
+    tick();
+    setInterval(tick, 5000);
+  }
+
   function showChatter(line) {
     if (!botBubble || !bubbleText) return;
     chatterLine = line;
@@ -3768,9 +3786,9 @@
     setTimeout(() => {
       const now = Date.now();
       jobs.unshift(
-        { id: now + 3, title: '示例课程 A', status: 'running', detail: '整理讲稿和笔记…', ts: now },
-        { id: now + 2, title: '示例课程 A', status: 'running', detail: '保存转写稿…', ts: now },
-        { id: now + 1, title: '示例课程 B', status: 'running', detail: '补识别 3 段…', ts: now },
+        { id: now + 3, title: '信息检索', status: 'running', detail: '整理讲稿和笔记…', ts: now },
+        { id: now + 2, title: '信息检索', status: 'running', detail: '保存转写稿…', ts: now },
+        { id: now + 1, title: '学术写作', status: 'running', detail: '补识别 3 段…', ts: now },
       );
       renderJobs();
       const b = document.getElementById('railJobs');
@@ -3780,7 +3798,7 @@
 
   if (location.search.includes('selftest=jobclick')) {
     setTimeout(() => {
-      const f = 'D:\\Obsidian\\收件箱\\课堂笔记-示例课程-2026-01-01-1200.md';
+      const f = 'D:\\知识库\\02-笔记\\课堂笔记-课堂 1025 0845-2026-10-25-0846.md';
       jobs.unshift({ id: Date.now(), title: '自测 任务卡点击', status: 'done',
         detail: '讲稿和笔记都已生成', ts: Date.now(), notes: f });
       renderJobs();
@@ -3798,7 +3816,7 @@
   }
 
   if (location.search.includes('selftest=done')) {
-    setTimeout(() => notice(pickDoneLine(), 'D:\\\\Obsidian\\\\收件箱\\\\_收件箱说明.md', 25000), 600);
+    setTimeout(() => notice(pickDoneLine(), 'D:\\\\知识库\\\\00-收件箱\\\\_收件箱说明.md', 25000), 600);
   }
 
   if (location.search.includes('selftest=fallback')) {
@@ -4260,6 +4278,7 @@
       + 'background:rgba(0,0,0,.82);color:#9fe3b0;font:11px/1.6 ui-monospace,Consolas,monospace;'
       + 'border-radius:8px;max-width:520px;white-space:pre-wrap;pointer-events:none';
     document.body.appendChild(box);
+    pollWatchdogForDiag();
     setInterval(() => {
       const rows = document.querySelectorAll('#transcript .seg').length;
       const withText = segments.filter((x) => (x.text || '').trim()).length;
@@ -4274,6 +4293,7 @@
         'notesReady ' + notesReady + ' / toneFollow ' + toneFollow,
         'clock      ' + elClock.textContent + ' / recordedSec ' + recordedSec.toFixed(1),
         'lastErr    ' + (lastRecogErr || '-'),
+        '看门狗     ' + (window.__watchdogText || '查询中…'),
         '脚本错误   ' + (window.__lastError || '-'),
         '最近提示   ' + (lastNoticeText || '-'),
         '箭头       ' + (function(){ const a = document.getElementById('bubbleArrow'); if (!a) return '无元素'; const r = a.getBoundingClientRect(); return (a.classList.contains('hidden') ? 'hidden ' : 'shown ') + 'x=' + Math.round(r.left) + ' y=' + Math.round(r.top) + ' w=' + Math.round(r.width) + ' h=' + Math.round(r.height); })(),
