@@ -1,49 +1,79 @@
 Option Explicit
-' 课堂转写 —— 无窗口启动（脚本可随文件夹一起移动）
-Dim shell, fso, base, port, url, i, ok, pyw
+' 课堂转写 —— 守护启动
+' 作用：后台跑 pythonw，进程退出（崩溃 / 看门狗主动退出）后自动拉起
+' 首次启动时等它就绪，然后打开浏览器
+
+Const PORT = 8787
+Const URL = "http://127.0.0.1:8787/"
+
+Dim shell, fso, base, pyw, pythonExe, i, ok, opened, restarts
+
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
-
 base = fso.GetParentFolderName(WScript.ScriptFullName)
-port = 8787
-url = "http://127.0.0.1:" & port & "/"
 
 If Not fso.FileExists(base & "\server.py") Then
-  MsgBox "找不到 server.py，请把本文件放回程序文件夹。" & vbCrLf & base, 16, "课堂转写"
+  MsgBox "找不到 server.py，请把本文件放回程序文件夹。", 16, "课堂转写"
   WScript.Quit 1
 End If
 
-If Health(url) Then
-  shell.Run url, 1, False
-  WScript.Quit 0
+' 优先用内置运行时（分享包里带），其次找系统 python
+pyw = base & "\python\pythonw.exe"
+If Not fso.FileExists(pyw) Then
+  pyw = FindPythonW()
 End If
-
-shell.Run "cmd /c for /f ""tokens=5"" %p in ('netstat -ano ^| findstr :" & port & " ^| findstr LISTENING') do taskkill /PID %p /F", 0, True
-
-pyw = FindPythonW()
 If pyw = "" Then
-  MsgBox "找不到 pythonw.exe，请确认 Python 已安装。", 16, "课堂转写"
+  MsgBox "找不到 pythonw.exe。请确认包内有 python 文件夹，或已安装 Python。", 16, "课堂转写"
   WScript.Quit 1
 End If
 
 shell.CurrentDirectory = base
-shell.Run """" & pyw & """ """ & base & "\server.py"" --port " & port, 0, False
 
-ok = False
-For i = 1 To 30
-  WScript.Sleep 1000
-  If Health(url) Then
-    ok = True
-    Exit For
-  End If
-Next
-
-If ok Then
-  shell.Run url, 1, False
-Else
-  MsgBox "30 秒内没能连上服务。" & vbCrLf & vbCrLf & _
-         "请改用 一键启动.bat 查看报错。", 48, "课堂转写"
+' 已经在跑就直接开浏览器
+If Health(URL) Then
+  shell.Run URL, 1, False
+  WScript.Quit 0
 End If
+
+' 清掉占用端口的僵尸进程
+shell.Run "cmd /c for /f ""tokens=5"" %p in ('netstat -ano ^| findstr :" & PORT & " ^| findstr LISTENING') do taskkill /PID %p /F", 0, True
+
+opened = False
+restarts = 0
+
+Do
+  shell.Run """" & pyw & """ """ & base & "\server.py"" --port " & PORT, 0, False
+
+  ' 等它就绪（最多 20 秒）
+  ok = False
+  For i = 1 To 40
+    WScript.Sleep 500
+    If Health(URL) Then
+      ok = True
+      Exit For
+    End If
+    If i = 10 Then Exit For
+  Next
+
+  If ok And Not opened Then
+    shell.Run URL, 1, False
+    opened = True
+  End If
+
+  ' 守在这里：只要还活着就别动
+  Do
+    WScript.Sleep 2000
+  Loop While Health(URL)
+
+  restarts = restarts + 1
+  WScript.Sleep 2000
+
+  If restarts > 20 Then
+    MsgBox "服务连续 " & restarts & " 次启动失败，已停止自动重启。" & vbCrLf & vbCrLf & _
+           "请改用 启动.bat 查看报错信息。", 48, "课堂转写"
+    WScript.Quit 1
+  End If
+Loop
 
 Function Health(u)
   On Error Resume Next
@@ -56,7 +86,7 @@ Function Health(u)
 End Function
 
 Function FindPythonW()
-  Dim cand, p
+  Dim cand, p, exec, line
   cand = Array( _
     shell.ExpandEnvironmentStrings("%USERPROFILE%") & "\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\pythonw.exe", _
     shell.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\Programs\Python\Python312\pythonw.exe", _
@@ -68,7 +98,6 @@ Function FindPythonW()
       Exit Function
     End If
   Next
-  Dim exec, line
   On Error Resume Next
   Set exec = shell.Exec("cmd /c where pythonw.exe")
   If Err.Number = 0 Then

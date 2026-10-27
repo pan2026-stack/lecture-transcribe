@@ -686,6 +686,69 @@ def _notes_chat_full(cfg: dict, messages: list, max_tokens: int, rounds: int = 6
     return out
 
 
+# ---------------------------------------------------------------- 看门狗
+# 作用：进程还活着但出网通道坏了（10061/10054）时主动退出，让外层守护重启它
+WATCHDOG = {"fails": 0, "last_check": 0.0, "last_alive": 0.0, "restarts": 0}
+LAST_ACTIVITY = [time.time()]
+
+
+def _touch():
+    """记录最近一次有业务请求的时间；录音/生成期间不重启"""
+    LAST_ACTIVITY[0] = time.time()
+
+
+def _probe_outbound() -> bool:
+    """只做 TCP 握手，不消耗接口额度"""
+    cfg = load_config()
+    url = cfg.get("notes_base_url") or "https://api.deepseek.com"
+    try:
+        host = urllib.parse.urlparse(url).hostname or "api.deepseek.com"
+    except Exception:
+        host = "api.deepseek.com"
+    port = 443 if url.startswith("https") else 80
+    try:
+        sock = socket.create_connection((host, port), timeout=6)
+        sock.close()
+        return True
+    except OSError:
+        return False
+
+
+def _watchdog_loop():
+    while True:
+        time.sleep(45)
+        try:
+            WATCHDOG["last_check"] = time.time()
+            if not _probe_outbound():
+                WATCHDOG["fails"] += 1
+            else:
+                WATCHDOG["fails"] = 0
+                WATCHDOG["last_alive"] = time.time()
+            if WATCHDOG["fails"] < 3:
+                continue
+            # 连续三次（约 2 分钟）出网失败
+            idle_for = time.time() - LAST_ACTIVITY[0]
+            busy_jobs = [k for k, v in NOTES_PROGRESS.items()
+                         if v.get("stage") not in ("done", "error", "unknown")]
+            if idle_for < 90 or busy_jobs:
+                print(f"[watchdog] 出网失败 {WATCHDOG['fails']} 次，但正在使用中"
+                      f"（{idle_for:.0f}s 前有请求 / {len(busy_jobs)} 个任务在跑），暂不重启")
+                continue
+            print(f"[watchdog] 出网连续失败 {WATCHDOG['fails']} 次且已空闲 {idle_for:.0f}s，主动退出等待守护重启")
+            sys.stdout.flush()
+            os._exit(9)          # 交给外层守护进程拉起
+        except Exception as exc:   # 看门狗自己不能崩
+            print(f"[watchdog] 检查异常：{exc}")
+
+
+def start_watchdog():
+    if not load_config().get("watchdog_restart", True):
+        print("[watchdog] 已关闭（watchdog_restart=false）")
+        return
+    threading.Thread(target=_watchdog_loop, name="watchdog", daemon=True).start()
+    print("[watchdog] 已启动：每 45 秒探一次出网，连续 3 次失败且空闲时自动重启")
+
+
 def generate_notes(payload: dict) -> dict:
     """把转写稿交给 DeepSeek：产出「整理后的完整讲稿」+「结构化笔记」两份文件"""
     cfg = load_config()
@@ -709,6 +772,7 @@ def generate_notes(payload: dict) -> dict:
     total_chars = len(transcript)
     print(f"[notes] 转写稿 {len(segments)} 段 / {total_chars} 字")
     _progress(job, stage="start", done=0, total=1, text="正在准备")
+    _touch()
 
     try:
         # 长课：分段整理讲稿，笔记用整理后的讲稿生成（上下文更省、去噪更好）
@@ -1425,6 +1489,7 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/config":
             return self._json(200, public_config(load_config()))
         if route == "/api/health":
+            _touch()
             return self._json(200, health())
         if route == "/api/stats":
             try:
@@ -1480,6 +1545,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         self._log_line(f"POST {self.path}  from {self.client_address[0]}")
+        _touch()
         route = self.path.split("?")[0]
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1637,6 +1703,7 @@ def main():
         srv = DualStackServer((host, args.port), Handler)
     except OSError:
         srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    start_watchdog()
     swept = sweep_audio()
     if swept:
         print(f"清理了 {swept} 个未转写的历史音频片段")
