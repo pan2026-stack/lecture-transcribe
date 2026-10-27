@@ -630,7 +630,9 @@ def _notes_chat(cfg: dict, messages: list, max_tokens: int) -> tuple[str, str]:
     ).encode("utf-8")
 
     last_err = ""
-    for attempt in range(3):
+    # 网络瞬断（VPN 切换、DNS 节点抽风）会报 10061/10054，多给几次机会
+    backoff = [3, 6, 10, 15]
+    for attempt in range(len(backoff) + 1):
         req = urllib.request.Request(
             url, data=body, method="POST",
             headers={
@@ -647,18 +649,18 @@ def _notes_chat(cfg: dict, messages: list, max_tokens: int) -> tuple[str, str]:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
             last_err = f"HTTP {exc.code}：{detail}"
-            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
-                time.sleep(3 * (attempt + 1))
+            if exc.code in (429, 500, 502, 503, 504) and attempt < len(backoff):
+                time.sleep(backoff[attempt])
                 continue
             raise RuntimeError(f"DeepSeek 接口返回 {last_err}") from None
         except (urllib.error.URLError, ConnectionResetError, TimeoutError) as exc:
             reason = getattr(exc, "reason", exc)
             last_err = str(reason)
             print(f"[notes] 第 {attempt + 1} 次请求失败：{last_err}")
-            if attempt < 2:
-                time.sleep(3 * (attempt + 1))
+            if attempt < len(backoff):
+                time.sleep(backoff[attempt])
                 continue
-            raise RuntimeError(f"连不上 {url}：{last_err}") from None
+            raise RuntimeError(f"连不上 {url}（已重试 {len(backoff)} 次）：{last_err}。检查网络或代理后重试。") from None
         except json.JSONDecodeError:
             raise RuntimeError("DeepSeek 返回的不是合法 JSON。") from None
         except (KeyError, IndexError, TypeError):
