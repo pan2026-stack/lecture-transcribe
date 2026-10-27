@@ -84,6 +84,11 @@ DEFAULT_CONFIG = {
     "obsidian_inbox": "",
     # 重新生成时，把知识库里同名旧文件归档到 99-归档（不直接删）
     "archive_old_notes": True,
+    # 看门狗：出网连续失败时主动退出等待守护重启
+    # "watchdog_strict": False -> 宽松：不管有没有在录音都会重启
+    # "watchdog_strict": True  -> 严格：录音/整理期间不重启
+    "watchdog_restart": True,
+    "watchdog_strict": False,
     # 延伸阅读最多给几条；4 是「一屏扫完」的经验值，可改
     "reading_list_max": 4,
 }
@@ -700,7 +705,7 @@ def _touch():
 def _probe_outbound() -> bool:
     """只做 TCP 握手，不消耗接口额度"""
     cfg = load_config()
-    url = cfg.get("notes_base_url") or "https://api.deepseek.com"
+    url = os.environ.get("DICT_PROBE_TARGET") or cfg.get("notes_base_url") or "https://api.deepseek.com"
     try:
         host = urllib.parse.urlparse(url).hostname or "api.deepseek.com"
     except Exception:
@@ -715,8 +720,10 @@ def _probe_outbound() -> bool:
 
 
 def _watchdog_loop():
+    interval = float(os.environ.get("DICT_PROBE_SECONDS", "45"))
+    threshold = int(os.environ.get("DICT_PROBE_FAILS", "3"))
     while True:
-        time.sleep(45)
+        time.sleep(interval)
         try:
             WATCHDOG["last_check"] = time.time()
             if not _probe_outbound():
@@ -724,16 +731,19 @@ def _watchdog_loop():
             else:
                 WATCHDOG["fails"] = 0
                 WATCHDOG["last_alive"] = time.time()
-            if WATCHDOG["fails"] < 3:
+            if WATCHDOG["fails"] < threshold:
                 continue
-            # 连续三次（约 2 分钟）出网失败
+            # 连续多次出网失败
             idle_for = time.time() - LAST_ACTIVITY[0]
             busy_jobs = [k for k, v in NOTES_PROGRESS.items()
                          if v.get("stage") not in ("done", "error", "unknown")]
-            if idle_for < 90 or busy_jobs:
+            strict = bool(load_config().get("watchdog_strict", False))
+            if strict and (idle_for < 90 or busy_jobs):
                 print(f"[watchdog] 出网失败 {WATCHDOG['fails']} 次，但正在使用中"
-                      f"（{idle_for:.0f}s 前有请求 / {len(busy_jobs)} 个任务在跑），暂不重启")
+                      f"（{idle_for:.0f}s 前有请求 / {len(busy_jobs)} 个任务在跑），严格模式暂不重启")
                 continue
+            print(f"[watchdog] 出网连续失败 {WATCHDOG['fails']} 次（宽松模式按策略重启，"
+                  f"空闲 {idle_for:.0f}s / 任务 {len(busy_jobs)} 个），主动退出等待守护重启")
             print(f"[watchdog] 出网连续失败 {WATCHDOG['fails']} 次且已空闲 {idle_for:.0f}s，主动退出等待守护重启")
             sys.stdout.flush()
             os._exit(9)          # 交给外层守护进程拉起
