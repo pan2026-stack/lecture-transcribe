@@ -1,8 +1,0 @@
-{
-  "dependencies": {
-    "@eslint/js": "^10.0.1",
-    "eslint": "^10.13.0",
-    "lighthouse": "^13.5.0",
-    "puppeteer-core": "^25.16.0"
-  }
-}

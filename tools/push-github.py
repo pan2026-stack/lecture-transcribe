@@ -22,7 +22,8 @@ SYNC_FILES = ['server.py', 'app.js', 'index.html', 'style.css', 'export.py', 'sp
               'config.example.json', 'make-portable.py', 'make-share.py', 'make-debug.py',
               'qa.js', 'smoke.py', 'record.js', 'app.ico', '.gitignore',
               '修复与自测说明.md', '启动-调试.bat']
-SYNC_DIRS = ['emotion-ball', 'tests', 'tools']
+SYNC_DIRS = ['emotion-ball', 'tests']
+SYNC_TOOLS = ['qa.js', 'smoke.py', 'push-github.py', 'eslint.config.mjs']
 SKIP_DIR_NAMES = {'node_modules', '__pycache__', 'shots', 'ruffpy', '_probe', 'portable'}
 
 CANDIDATES = ['140.82.112.4', '140.82.113.4', '140.82.114.4',
@@ -156,6 +157,13 @@ def sync():
             for f in files:
                 shutil.copy2(os.path.join(root, f), os.path.join(target, f))
                 copied += 1
+    tools_dst = os.path.join(REPO, 'tools')
+    os.makedirs(tools_dst, exist_ok=True)
+    for name in SYNC_TOOLS:
+        src = os.path.join(PROJECT, 'tools', name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(tools_dst, name))
+            copied += 1
     print(f'已同步 {copied} 个文件到镜像仓库')
     return True
 
