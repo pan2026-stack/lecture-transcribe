@@ -1114,11 +1114,19 @@
 
   // 连续的空段落折叠成一行，稿子不被「（本段没听到内容）」刷屏
   function foldSilence(rowEl, timeLabel) {
-    if (!rowEl || !rowEl.parentNode) return;
+    // 注意：不能再只判断 rowEl.parentNode。转写区被清空后，行虽然脱离了文档，
+    // 但它内部的 .x 仍然有 parentNode，旧写法会在 insertBefore 上抛 TypeError，
+    // 还被误报成「连不上本地服务」。这里一律用 isConnected。
+    if (!rowEl || !rowEl.isConnected) return;
     const seg = rowEl.closest('.seg') || rowEl;      // 整行（含时间列）一起藏
+    if (!seg || !seg.isConnected || !seg.parentNode) return;
     seg.classList.add('is-silent');
-    let run = seg.previousElementSibling;
-    if (!run || !run.classList.contains('silence-run')) {
+
+    // 往前跳过所有已折叠的静音行，找到这条静音带的开头
+    let prev = seg.previousElementSibling;
+    while (prev && prev.classList.contains('is-silent')) prev = prev.previousElementSibling;
+    let run = (prev && prev.classList.contains('silence-run')) ? prev : null;
+    if (!run) {
       run = document.createElement('div');
       run.className = 'silence-run';
       run.dataset.first = timeLabel;
@@ -1170,6 +1178,7 @@
         return postWav(blob, 1);
       }
       // 网络断开（多半是黑窗口被关了）：等本地服务回来，最多重试 5 次、约 15 秒
+      if (!err.status) err.network = true;      // 只有网络类错误才算「连不上」，别把代码 bug 也算进去
       if (!err.status && attempt < 5) {
         setModeText(`等待本地服务 ${attempt + 1}/5`, 'warn');
         if (attempt === 0) {
@@ -1202,18 +1211,22 @@
   async function uploadSegment(blob, timeLabel, node, seq, tone) {
     inflight++;
     const rowEl = node.x;
+    // 转写区可能已经被清空（例如点「结束并保存」后），那时候只收数据、不碰 DOM
+    const alive = () => !!(node && node.row && node.row.isConnected);
     const rec = { seq, time: timeLabel, text: '', tr: '', trEl: node.tr, translated: false };
     try {
       const data = await postWav(blob);
       const text = (data.text || '').trim();
-      rowEl.classList.remove('pending');
+      if (alive()) rowEl.classList.remove('pending');
       lastTextAt = Date.now();
     const plain = (text || '').trim();
     if (plain.length > 80) flashEmotion('13', null, 1500);          // 惊讶：这段特别长
     else if (/[?？]$/.test(plain)) flashEmotion('11', null, 1400);  // 疑惑：问句
-    if (text) setRowText(rowEl, text);
-    else foldSilence(rowEl, timeLabel);
+    if (alive()) {
+      if (text) setRowText(rowEl, text);
+      else foldSilence(rowEl, timeLabel);
       maybeTagTone(rowEl, tone, text, seq);
+    }
       rec.text = text;
       segments.push(rec);
       if (running && Math.random() < 0.12) flashEmotion('10', '16', 1600);
@@ -1225,20 +1238,27 @@
     } catch (err) {
       failStreak++;
       lastRecogErr = String(err.message || err).slice(0, 140);
-      rowEl.classList.remove('pending');
-      rowEl.classList.add('error');
+      if (alive()) {
+        rowEl.classList.remove('pending');
+        rowEl.classList.add('error');
+      }
       setEmotion('34');
       flashEmotion('17', null, 1500);   // 慌张
       if (err.name === 'AbortError') {
       setTimeout(() => setEmotion('15'), 2400);
-        setRowText(rowEl, '识别超时：这一段没送出去');
+        if (alive()) setRowText(rowEl, '识别超时：这一段没送出去');
         showBanner('有一段音频识别超过 60 秒没响应，已跳过。网络不稳时会偶发，可以继续听。');
-      } else if (err.status === undefined) {
-        setRowText(rowEl, '上传失败：连不上本地服务');
+      } else if (err.status === undefined && err.network) {
+        if (alive()) setRowText(rowEl, '上传失败：连不上本地服务');
         showBanner(`连不上本地服务（页面地址 ${location.origin}，错误 ${err.name}: ${String(err.message).slice(0, 60)}）。`
           + '如果地址栏不是 http://127.0.0.1:8787，请换这个地址打开；否则重开「课堂转写.bat」后刷新页面。');
+      } else if (err.status === undefined) {
+        // 非网络类异常（前端 bug）：明确说是本地出错，不要误导成断网
+        console.error('[segment] 处理出错', err);
+        if (alive()) setRowText(rowEl, '这一段处理出错了（不是网络问题）');
+        showBanner(`这一段处理出错：${String(err.message).slice(0, 80)}。其它段不受影响，可以继续。`, 9000);
       } else {
-        setRowText(rowEl, `识别失败：${err.message}`);
+        if (alive()) setRowText(rowEl, `识别失败：${err.message}`);
         if (/(KEY|api key|令牌|认证)/i.test(err.message)) {
           showBanner('识别接口的 KEY 有问题。点右上角「设置」核对第一组 KEY 后保存。');
         }
@@ -1973,8 +1993,13 @@
     // 2) 存转写稿
     updateJob(job, { detail: '保存转写稿…' });
     let saved = false;
-    const saveRes = await postJsonRetry('/api/save',
+    let saveRes = await postJsonRetry('/api/save',
       { title: meta.title, duration: meta.duration, segments: snapshot }, 4, 1500);
+    if (!saveRes.ok && await waitForServer(45000)) {
+      // 服务刚重启回来，再给一次机会
+      saveRes = await postJsonRetry('/api/save',
+        { title: meta.title, duration: meta.duration, segments: snapshot }, 2, 1500);
+    }
     if (saveRes.ok) saved = !!saveRes.data.path;
 
     if (!saved) {
@@ -1990,7 +2015,8 @@
     }
 
     // 3) 整理讲稿 + 笔记
-    updateJob(job, { detail: '整理讲稿和笔记…' });
+    updateJob(job, { detail: '整理讲稿和笔记…', pct: 6 });
+    beginProgress('正在整理讲稿和笔记…');
     setEmotion('37');                  // 复述回忆：过一遍刚录的内容
     setTimeout(() => setEmotion('30'), 900);
     let out = null;
@@ -1998,7 +2024,9 @@
       const notesJob = 'j' + Date.now().toString(36);
       const stopWatch = watchNotesProgress(notesJob, (d) => {
         const text = progressText(d);
-        if (text) updateJob(job, { detail: text });
+        const pct = progressPct(d);
+        if (pct != null) updateProgress(pct, text || job.detail);
+        if (text) updateJob(job, { detail: text, pct: pct == null ? job.pct : pct });
       });
       let res;
       try {
@@ -2018,7 +2046,19 @@
             body: JSON.stringify({
               title: meta.title, duration: meta.duration, segments: snapshot, job: notesJob + 'b',
             }),
-          });
+          }).catch(() => null);
+        }
+        if (!res || !res.ok) {
+          // 服务在重启：等它回来，再试最后一次
+          if (await waitForServer(45000)) {
+            res = await fetch('/api/notes', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                title: meta.title, duration: meta.duration, segments: snapshot, job: notesJob + 'c',
+              }),
+            }).catch(() => null);
+          }
         }
       } finally {
         stopWatch();
@@ -2028,8 +2068,9 @@
     } catch (_) {}
 
     if (out && out.notes_path) {
+      finishProgress('整理完成');
       updateJob(job, {
-        status: 'done', detail: '讲稿和笔记都已生成',
+        status: 'done', detail: '讲稿和笔记都已生成', pct: 100,
         article: out.article_path, notes: out.notes_path,
       });
       setEmotion('33');
@@ -2037,8 +2078,13 @@
       setTimeout(() => { if (!running) setEmotion('02'); }, 4000);
       elFoot.textContent = '上一节处理完了：点气泡，或到「处理」里看。';
     } else {
-      updateJob(job, { status: 'error', detail: '整理没成，转写稿已保存' });
-      notice('整理没成，但转写稿已经存下来了。到「处理」里找到这一节，点右侧「重新整理」就能再来一次。', '', 25000);
+      clearGlobalProgress();
+      updateJob(job, { status: 'error', detail: '整理没成，转写稿已保存', pct: 100 });
+      if (serverDown) {
+        notice('本地服务重启中，稿子已经存好了。等服务回来后到「处理」里点「重新整理」。', '', 25000);
+      } else {
+        notice('整理没成，但转写稿已经存下来了。到「处理」里找到这一节，点右侧「重新整理」就能再来一次。', '', 25000);
+      }
       setEmotion('34');
     }
       setTimeout(() => setEmotion('15'), 2400);
@@ -2664,6 +2710,10 @@
       const d = (job.detail || '') + (job.title || '');
       if (job.status === 'done') return { pct: 100, indet: false, text: '完成' };
       if (job.status === 'error') return { pct: 100, indet: false, text: '失败' };
+      // 有服务端真实进度就用它，别按文字猜
+      if (job.status === 'running' && typeof job.pct === 'number') {
+        return { pct: job.pct, indet: false, text: job.detail || '处理中' };
+      }
       if (/等待最后几段/.test(d)) return { pct: 8, indet: false, text: '等最后几段' };
       if (/补识别/.test(d)) return { pct: 18, indet: false, text: '补识别' };
       if (/保存转写稿|存稿/.test(d)) return { pct: 34, indet: false, text: '保存转写稿' };
@@ -3311,13 +3361,13 @@
     const label = btn ? btn.textContent : '';
     const job = 'r' + Date.now().toString(36);
     if (btn) { btn.disabled = true; btn.textContent = '整理中…'; }
-    showBanner('正在整理，进度显示在按钮上…', 0);
+    hideBanner();
+    beginProgress('正在整理讲稿和笔记…');
     const stopWatch = watchNotesProgress(job, (d) => {
       const text = progressText(d);
-      if (text) {
-        if (btn) btn.textContent = text;
-        showBanner(text + '（不要关闭页面）', 0);
-      }
+      const pct = progressPct(d);
+      if (pct != null) updateProgress(pct, text);
+      if (text && btn) btn.textContent = text;   // 顶部进度面板已经在显示，不再重复刷横幅
     });
     try {
       const res = await fetch('/api/notes', {
@@ -3327,12 +3377,24 @@
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      finishProgress('整理完成');
       hideBanner();
       await loadFiles();
       await selectFile(data.notes_path);
       showBanner('已重新整理完成，同名旧文件已覆盖。', 6000);
     } catch (err) {
-      showBanner(`重新整理失败：${err.message}`);
+      clearGlobalProgress();
+      const netErr = !err || /Failed to fetch|NetworkError|load failed/i.test(String(err.message || err));
+      if (netErr) {
+        showBanner('服务好像重启了，正在等它回来…', 0);
+        if (await waitForServer(45000)) {
+          showBanner('服务已恢复，请再点一次「重新整理」。', 8000);
+        } else {
+          showBanner('服务没有恢复，请双击桌面「课堂转写」图标重启。', 0);
+        }
+      } else {
+        showBanner(`重新整理失败：${err.message}`);
+      }
     } finally {
       stopWatch();
       if (btn) { btn.disabled = false; btn.textContent = label || '重新整理成笔记'; }
@@ -3343,6 +3405,164 @@
   async function regenNotes() {
     const path = currentDocPath || regenSource;
     await startRegen(path, $('btnRegenNotes'));
+  }
+
+  // ---------------------------------------------------------------- 进度与连接状态
+  const gpBox = $('globalProgress');
+  const gpFill = $('globalProgressFill');
+  const gpLabel = $('globalProgressLabel');
+  const gpTime = $('globalProgressTime');
+  const serverAlert = $('serverAlert');
+  const serverAlertText = $('serverAlertText');
+  const btnServerReload = $('btnServerReload');
+
+  let serverDown = false;
+  let serverDownAt = 0;
+  let serverPingTimer = null;
+
+  // 进度条状态：不确定进度（0-100 未知）+ 已用时间，让人看得出还在动
+  const gpState = { pct: null, text: '', indet: true, t0: 0, ticker: null };
+
+  function renderProgress() {
+    if (!gpBox) return;
+    const sec = gpState.t0 ? Math.round((Date.now() - gpState.t0) / 1000) : 0;
+    if (gpLabel) gpLabel.textContent = gpState.text || '正在整理';
+    if (gpTime) gpTime.textContent = sec >= 2 ? `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}` : '';
+    gpBox.classList.toggle('indeterminate', gpState.indet);
+    if (gpTime && !gpState.indet) gpTime.textContent = `${Math.round(gpState.pct)}% · ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    if (!gpState.indet && gpFill) gpFill.style.width = Math.max(2, Math.min(100, gpState.pct)) + '%';
+  }
+
+  function tickProgress() {
+    if (gpState.ticker) return;
+    gpState.ticker = setInterval(renderProgress, 1000);
+  }
+
+  function stopProgressTicker() {
+    if (gpState.ticker) {
+      clearInterval(gpState.ticker);
+      gpState.ticker = null;
+    }
+  }
+
+  function beginProgress(text) {
+    gpState.text = text || '正在整理';
+    gpState.pct = null;
+    gpState.indet = true;
+    gpState.t0 = Date.now();
+    if (gpBox) gpBox.classList.remove('hidden');
+    tickProgress();
+    renderProgress();
+  }
+
+  function updateProgress(pct, text) {
+    if (text) gpState.text = text;
+    if (pct != null) {
+      gpState.pct = pct;
+      gpState.indet = false;
+    }
+    if (!gpState.t0) gpState.t0 = Date.now();
+    if (gpBox) gpBox.classList.remove('hidden');
+    tickProgress();
+    renderProgress();
+  }
+
+  function finishProgress(text) {
+    if (gpBox) gpBox.classList.remove('hidden');
+    gpState.text = text || '整理完成';
+    gpState.pct = 100;
+    gpState.indet = false;
+    renderProgress();
+    stopProgressTicker();
+    setTimeout(() => { if (gpBox) gpBox.classList.add('hidden'); }, 1600);
+  }
+
+  function clearGlobalProgress() {
+    stopProgressTicker();
+    gpState.t0 = 0;
+    gpState.pct = null;
+    if (gpBox) {
+      gpBox.classList.add('hidden');
+      gpBox.classList.remove('indeterminate');
+    }
+  }
+
+  function showServerAlert(text, kind) {
+    if (!serverAlert) return;
+    serverAlert.classList.remove('hidden', 'recovered', 'failed');
+    if (kind) serverAlert.classList.add(kind);
+    if (serverAlertText) serverAlertText.textContent = text;
+    if (btnServerReload) btnServerReload.classList.toggle('hidden', kind !== 'failed');
+  }
+
+  function hideServerAlert() {
+    if (serverAlert) serverAlert.classList.add('hidden');
+  }
+
+  // 轻量探活：只看本地服务，不调用外部接口
+  async function pingServer(timeoutMs = 2500) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch('/api/ping', { signal: ctrl.signal, cache: 'no-store' });
+      return res.ok;
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function waitForServer(maxMs = 60000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      if (await pingServer()) return true;
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+    return false;
+  }
+
+  function startServerWatch() {
+    if (serverPingTimer) return;
+    serverPingTimer = setInterval(async () => {
+      if (document.hidden) return;
+      const ok = await pingServer();
+      if (!ok && !serverDown) {
+        serverDown = true;
+        serverDownAt = Date.now();
+        showServerAlert('本地服务连不上了，正在等它重启…');
+        // 断开期间别让用户以为在整理
+        if (gpBox && !gpBox.classList.contains('hidden') && gpLabel) {
+          gpLabel.textContent = '服务重启中…';
+        }
+      } else if (ok && serverDown) {
+        serverDown = false;
+        showServerAlert('服务已恢复', 'recovered');
+        setTimeout(hideServerAlert, 2600);
+      } else if (!ok && serverDown && Date.now() - serverDownAt > 45000) {
+        showServerAlert('服务启动失败，请双击桌面「课堂转写」图标重启', 'failed');
+      }
+    }, 3000);
+  }
+
+  if (btnServerReload) {
+    btnServerReload.addEventListener('click', () => location.reload());
+  }
+
+  // 把服务端阶段换算成 0-100，用于进度条
+  function progressPct(d) {
+    if (!d) return null;
+    if (d.stage === 'done') return 100;
+    if (d.stage === 'error') return null;
+    if (d.stage === 'save') return 96;
+    if (d.stage === 'notes') return 90;
+    if (d.stage === 'article') {
+      const total = Number(d.total) || 0;
+      const done = Number(d.done) || 0;
+      // 分块整理才算得出百分比，单次调用就保持不确定进度
+      return total > 1 ? 8 + (done / total) * 78 : null;
+    }
+    return null;
   }
 
   // 带重试的 POST：服务重启/网络抖动时多试几次，别一次失败就判死
@@ -3671,6 +3891,7 @@
   spinIdleBall();
   loadStats();
   initBubbleSound();
+  startServerWatch();
   loadJobs();
   renderJobs();
   startJobsAutoRefresh();
@@ -3967,6 +4188,18 @@
     pre.textContent = JSON.stringify(out);
     document.body.appendChild(pre);
     return out;
+  };
+
+  // 回归测试钩子：验证「转写区被清空后，静音折叠不能再抛 insertBefore 错误」
+  window.__foldTest = (detach) => {
+    const node = addSegmentRow('00:99');
+    if (detach) node.row.remove();
+    try {
+      foldSilence(node.x, '00:99');
+      return 'ok';
+    } catch (e) {
+      return 'throw:' + e.message;
+    }
   };
 
   if (location.search.includes('qa=1')) {

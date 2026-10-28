@@ -2508,3 +2508,106 @@ body.hourslow .hour-chip-fly { transition-duration: 1.84s, 1.84s, .9s; }
 .file-row .fmeta { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
 .file-row .fmeta .ft { margin-bottom: 0; }
 .file-row .fk { margin-right: 0; }
+
+
+/* ---------------- 全局整理进度条 ---------------- */
+.global-progress {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  width: 330px;
+  padding: 9px 12px 10px;
+  border-radius: 13px;
+  background: rgba(252, 253, 255, .95);
+  border: 1px solid rgba(158, 172, 193, .28);
+  box-shadow: 0 10px 26px rgba(30, 45, 65, .14), 0 1px 0 rgba(255, 255, 255, .9) inset;
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+.global-progress .gp-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+.global-progress .gp-label {
+  font-size: 12px;
+  color: #3d4b5c;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.global-progress .gp-time {
+  font-size: 11px;
+  color: #8a95a5;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.global-progress .gp-track {
+  height: 4px;
+  border-radius: 3px;
+  background: rgba(158, 172, 193, .28);
+  overflow: hidden;
+}
+.global-progress .gp-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #3f8fbb, #63b0d6);
+  transition: width .45s cubic-bezier(.3, .8, .3, 1);
+}
+.global-progress.indeterminate .gp-fill {
+  width: 34% !important;
+  animation: gpSlide 1.15s ease-in-out infinite;
+}
+@keyframes gpSlide {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+
+/* ---------------- 服务断开提示 ---------------- */
+.server-alert {
+  position: fixed;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%);
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 16px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  color: #7a3f22;
+  background: rgba(255, 244, 232, .96);
+  border: 1px solid rgba(200, 120, 60, .28);
+  box-shadow: 0 8px 22px rgba(120, 80, 40, .16);
+  backdrop-filter: blur(8px);
+}
+.server-alert .sa-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #c9722f;
+  animation: saPulse 1.2s ease-in-out infinite;
+}
+.server-alert.recovered {
+  color: #2f6b4a;
+  background: rgba(238, 250, 243, .96);
+  border-color: rgba(60, 150, 100, .3);
+}
+.server-alert.recovered .sa-dot { background: #3f9a68; animation: none; }
+.server-alert.failed { color: #8a2f24; background: rgba(255, 238, 236, .97); border-color: rgba(180, 60, 50, .3); }
+.server-alert.failed .sa-dot { background: #b4443a; animation: none; }
+.server-alert button {
+  border: 0; cursor: pointer;
+  height: 26px; padding: 0 10px; border-radius: 8px;
+  font-size: 12px; color: #fff;
+  background: linear-gradient(145deg, #3a8dbd, #22719e);
+}
+@keyframes saPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .45; transform: scale(.85); }
+}

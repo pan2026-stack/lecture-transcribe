@@ -8,6 +8,20 @@
     <link rel="stylesheet" href="style.css" />
 </head>
 <body class="is-idle">
+<div class="global-progress hidden" id="globalProgress" aria-hidden="true">
+  <div class="gp-row">
+    <span class="gp-label" id="globalProgressLabel">正在整理…</span>
+    <span class="gp-time" id="globalProgressTime"></span>
+  </div>
+  <div class="gp-track"><span class="gp-fill" id="globalProgressFill"></span></div>
+</div>
+
+<div class="server-alert hidden" id="serverAlert">
+  <span class="sa-dot"></span>
+  <span id="serverAlertText">本地服务连不上了，正在自动重启…</span>
+  <button id="btnServerReload" class="hidden">刷新页面</button>
+</div>
+
 <div class="shell">
 
   <!-- 左侧竖排 -->
@@ -274,7 +288,7 @@
     <label>接口地址<input id="cfgNotesUrl" placeholder="https://api.deepseek.com" /></label>
     <label>模型<input id="cfgNotesModel" placeholder="deepseek-flash" /></label>
     <label>API Key<input id="cfgNotesKey" type="password" placeholder="留空表示不修改" autocomplete="off" /></label>
-    <label>落盘位置（Obsidian 收件箱）<input id="cfgInbox" placeholder="D:\Obsidian\00-收件箱" /></label>
+    <label>落盘位置（Obsidian 收件箱）<input id="cfgInbox" placeholder="D:\知识库\00-收件箱" /></label>
 
     <div class="modal-actions">
       <button class="ghost" id="btnCancel">取消</button>

@@ -1539,6 +1539,10 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         self._log_line(f"GET  {self.path}  from {self.client_address[0]}")
         route = self.path.split("?")[0]
+        if route == "/api/ping":
+            # 极轻量：不碰外部接口，只用来判断本地服务是否活着
+            return self._json(200, {"ok": True, "pid": os.getpid()})
+
         if route == "/api/watchdog":
             cfg = load_config()
             now = time.time()
