@@ -1,0 +1,15 @@
+{
+  "base_url": "https://api.siliconflow.cn/v1",
+  "model": "XingChenAGI/XingChenASR-V3.2-Ultra",
+  "language": "zh",
+  "segment_seconds": 15,
+  "prompt": "以下是大学课堂的中文讲解，可能中英夹杂，保留专业术语、公式和符号。",
+  "request_timeout": 90,
+  "notes_base_url": "https://api.deepseek.com",
+  "notes_model": "deepseek-flash",
+  "notes_timeout": 300,
+  "obsidian_inbox": "D:\\Obsidian\\00-收件箱",
+  "reading_list_max": 4,
+  "api_key": "",
+  "notes_api_key": ""
+}

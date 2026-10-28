@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>课堂转写</title>
+<link rel="icon" href="app.ico" />
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body class="is-idle">
+<div class="shell">
+
+  <!-- 左侧竖排 -->
+  <nav class="rail">
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 20 20"><rect x="2" y="7.5" width="3" height="5" rx="1"></rect><rect x="8.5" y="3" width="3" height="14" rx="1"></rect><rect x="15" y="9" width="3" height="2"></rect></svg>
+    </div>
+    <button class="tab on" id="railLog" data-view="log"><span class="ic">▤</span>记录</button>
+    <button class="tab" id="railJobs" data-view="jobs">
+      <span class="ic">⟳</span>处理<span class="tab-badge hidden" id="jobBadge">0</span>
+    </button>
+    <div class="spacer"></div>
+    <button class="tab" id="btnSettings"><span class="ic">⚙</span>设置</button>
+  </nav>
+
+  <div class="body">
+
+    <div class="banner hidden" id="banner"></div>
+
+    <div class="cols">
+      <!-- 左：工具条 + 转写 -->
+      <div class="left">
+        <div class="card toolbar">
+          <div class="dir-ctl" role="group" aria-label="翻译方向">
+            <button class="dir active" data-dir="off">原文</button>
+            <button class="dir" data-dir="auto">自动</button>
+            <button class="dir" data-dir="zh2en">中→英</button>
+            <button class="dir" data-dir="en2zh">英→中</button>
+          </div>
+          <button class="btn-outline hidden" id="btnBackfill">补译前面</button>
+          <span class="mode-chip" id="modeChip">未开始</span>
+          <button class="conn" id="connAsr" type="button"><i></i>识别</button>
+          <button class="conn" id="connNotes" type="button"><i></i>整理</button>
+
+        </div>
+
+        <div class="card transcript-wrap">
+          <div class="tx-head">
+            <span class="tx-title" id="txTitle">转写记录</span><span class="tx-mode hidden" id="txMode">上次的记录</span>
+            <div class="tx-tools">
+              <label class="switch"><input type="checkbox" id="chkFollow" checked /><span>自动跟随</span></label>
+              <button class="ghost" id="btnCopy">复制</button>
+            </div>
+          </div>
+          <div class="jobs-panel hidden" id="jobsPanel">
+            <!-- 只在有任务时出现的一条细进度 -->
+            <div class="jp-tasks" id="jobsStrip">
+              <span class="jp-dot" id="jobsDot"></span>
+              <b id="jobsCount">没有正在处理的任务</b>
+              <div class="jobs-list" id="jobsList"></div>
+            </div>
+
+            <div class="jp-body">
+              <aside class="jp-left">
+                <div class="jp-search">
+                  <input class="hist-search" id="histSearch" placeholder="搜索课程名…" />
+                </div>
+                <div class="hist-chips" id="histChips">
+                  <button class="hist-chip on" data-kind="all">全部</button>
+                  <button class="hist-chip" data-kind="笔记">笔记</button>
+                  <button class="hist-chip" data-kind="讲稿">讲稿</button>
+                  <button class="hist-chip" data-kind="转写稿">转写稿</button>
+                </div>
+                <div class="hist-list" id="histList"></div>
+              </aside>
+
+              <main class="jp-main" id="jpMain">
+                <div class="jp-empty">
+                  <div class="jp-empty-icon">▤</div>
+                  <p>左边选一条记录</p>
+                  <span>笔记、完整原文、转写稿都在这里，选中后在中间阅读</span>
+                </div>
+              </main>
+
+              <aside class="jp-right" id="jpRight"></aside>
+            </div>
+          </div>
+
+          <div class="transcript" id="transcript">
+            <p class="empty" id="emptyHint">点右下角的「开始听课」，允许麦克风，讲到哪记到哪。结束时这份稿子会存进知识库收件箱。</p>
+          </div>
+        </div>
+
+        <div class="foot">
+          <span id="footInfo">录音在本机切片后只发给识别接口，两个 KEY 都存在本机 config.json。</span>
+          <span class="saved hidden" id="savedPath"></span>
+        </div>
+      </div>
+
+      <!-- 右：舞台 + 数据 -->
+      <div class="right">
+        <div class="stage">
+          <div class="orb-area" id="orbArea">
+            <div class="glow" id="glow"></div>
+            <div class="pulse p3" id="ring3"></div>
+            <div class="pulse p2" id="ring2"></div>
+            <div class="pulse p1" id="ring1"></div>
+            <button class="ball-dock" id="ballDock" type="button">
+              <div id="ball"></div>
+            </button>
+            <div class="bot-bubble hidden" id="botBubble">
+              <span id="bubbleText">整理好了</span>
+              <button class="bubble-go" id="btnBubbleOpen">查看</button>
+            </div>
+          </div>
+          <canvas class="wavecanvas" id="waveCanvas" aria-hidden="true"></canvas>
+          <div class="tags" id="tags"></div>
+        </div>
+
+        <div class="card stats" data-view="idle">
+          <div class="stats-head">
+            <span class="dot" id="statusDot"></span>
+            <span id="segInfo">今天</span>
+            <button class="mini-link hidden" id="btnRecover">补识别 0 段</button>
+          </div>
+          <div class="cluster">
+            <div class="kpi-big" id="kpiBig">
+              <span id="kpiBigLabel">今天</span>
+              <b id="clock" class="clock-lcd"><span class="lcd-box" id="lcdBox" aria-hidden="true"></span><span class="lcd-unit" id="clockUnit">分</span><span class="sr-only" id="clockText">0 分</span></b>
+            </div>
+            <div class="week-bars" id="weekBars" aria-hidden="true"></div>
+            <div class="kpi-grid" id="kpiGrid">
+              <div class="kpi" data-key="sessions"><span>节课</span><b>0</b></div>
+              <div class="kpi" data-key="segments"><span>段落</span><b>0</b></div>
+              <div class="kpi" data-key="chars"><span>字数</span><b>0</b></div>
+              <div class="kpi" data-key="notes"><span>笔记</span><b>0</b></div>
+            </div>
+            <div class="hour-meter" id="hourMeter">
+              <div class="hour-strip">
+                <div class="hour-track" id="hourTrack"><span class="hour-fill" id="hourFill"></span></div>
+                <div class="hour-squares" id="hourSquares" aria-hidden="true"></div>
+              </div>
+              <div class="hour-caption"><span id="hourText">本小节 · 0 分</span><span id="hourNext">满 60 分攒一格</span></div>
+            </div>
+            <button class="btn btn-ghost is-ghost notes-btn" id="btnNotes" disabled aria-label="生成笔记"><svg class="ic lucide lucide-sparkles" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z" /> <path d="M20 2v4" /> <path d="M22 4h-4" /> <circle cx="4" cy="20" r="2" /> </svg><span class="notes-label">生成笔记</span></button>
+            <div class="actions">
+              <button class="btn-main" id="btnMain" data-state="idle" type="button">
+                <span class="bm-ripple-host">
+                  <svg class="bm-icon bm-play" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                       stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3" /></svg>
+                  <svg class="bm-icon bm-stop" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                       stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="5" y="5" rx="2" /></svg>
+                  <span class="bm-label">开始听课</span>
+                </span>
+              </button>
+              <i class="mitosis-bridge" aria-hidden="true"></i>
+              <button class="btn-pause is-collapsed" id="btnPause" type="button" aria-label="暂停"><span class="pause-bars" aria-hidden="true"><i></i><i></i></span><span class="sr-only" id="pauseText">暂停</span></button>
+              <!-- 生成笔记：常驻，不再藏在分裂动画里 -->
+
+            </div>
+            <div class="ver" id="appVer">v1.4.0</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<button class="jump-bottom hidden" id="btnJumpBottom">↓ 回到底部</button>
+
+<!-- 课程名 -->
+<div class="modal-layer hidden" id="courseModal">
+  <div class="modal-box course-box">
+    <h2 class="modal-title">这次听什么课？</h2>
+    <p class="modal-hint">填完点开始，转写稿、讲稿、笔记的文件名里都会带上它</p>
+
+    <label class="field-label" for="courseInput">课程名</label>
+    <input class="text-input" id="courseInput" maxlength="40" placeholder="例如：法理学 第五讲" />
+    <div class="title-chips" id="courseChips"></div>
+
+    <div class="name-preview" id="coursePreview"></div>
+
+    <div class="modal-acts">
+      <button class="btn btn-ghost" id="btnCourseCancel" type="button">取消</button>
+      <button class="btn btn-primary" id="btnCourseGo" type="button">开始听课</button>
+    </div>
+  </div>
+</div>
+
+<!-- 首次设置 -->
+<div class="modal hidden" id="setupModal">
+  <div class="modal-card">
+    <h2>先填两个 KEY 就能用</h2>
+    <p class="hint">识别和整理分别走两家服务，其他参数都已预置好，填完这两项即可开始。</p>
+    <label>硅基流动 API Key（语音识别）
+      <input id="setupSfKey" type="password" placeholder="sk-...  在 cloud.siliconflow.cn 申请" autocomplete="off" />
+    </label>
+    <label>DeepSeek API Key（整理讲稿和笔记）
+      <input id="setupDsKey" type="password" placeholder="sk-...  在 platform.deepseek.com 申请" autocomplete="off" />
+    </label>
+    <p class="hint" id="setupHint">两个 KEY 只存在本机 config.json，不会上传到别处。</p>
+    <div class="modal-actions">
+      <button class="ghost" id="btnSetupLater">稍后再说</button>
+      <button class="btn-primary" id="btnSetupSave">保存并开始</button>
+    </div>
+  </div>
+</div>
+
+<!-- 历史 -->
+<div class="modal hidden" id="historyModal">
+  <div class="modal-card wide">
+    <div class="notes-head">
+      <h2 id="historyTitle">历史记录</h2>
+      <div class="notes-actions">
+        <button class="ghost hidden" id="btnRegenNotes">重新生成笔记</button>
+        <span class="dl-group hidden" id="dlGroup">
+          <button class="ghost" data-dl="docx">Word</button>
+          <button class="ghost" data-dl="pdf">PDF</button>
+          <button class="ghost" data-dl="html">HTML</button>
+        </span>
+        <button class="ghost hidden" id="btnHistoryBack">← 列表</button>
+        <button class="ghost" id="btnCloseHistory">关闭</button>
+      </div>
+    </div>
+    <div class="notes-body" id="historyBody"></div>
+  </div>
+</div>
+
+<!-- 笔记 -->
+<div class="modal hidden" id="notesModal">
+  <div class="modal-card wide">
+    <div class="notes-head">
+      <div class="tabs">
+        <button class="tab active" data-tab="notes">结构化笔记</button>
+        <button class="tab" data-tab="article">完整原文</button>
+      </div>
+      <div class="notes-actions">
+        <button class="ghost" id="btnDownloadNotes" data-fmt="docx">Word</button>
+        <button class="ghost" id="btnDownloadPdf" data-fmt="pdf">PDF</button>
+        <button class="ghost" id="btnDownloadHtml" data-fmt="html">HTML</button>
+        <button class="ghost" id="btnCopyNotes">复制</button>
+        <button class="ghost" id="btnCloseNotes">关闭</button>
+      </div>
+    </div>
+    <div class="notes-cols">
+      <aside class="notes-nav" id="notesNav"></aside>
+      <div class="notes-body" id="notesBody"></div>
+      <aside class="notes-raw" id="notesRaw"></aside>
+    </div>
+    <p class="paths" id="notesPath"></p>
+  </div>
+</div>
+
+<!-- 设置 -->
+<div class="modal hidden" id="modal">
+  <div class="modal-card">
+    <h2>接口设置</h2>
+    <p class="hint">识别用 OpenAI 兼容的 <code>/audio/transcriptions</code>，整理用 DeepSeek 的 <code>/chat/completions</code>。</p>
+
+    <p class="group-label">语音识别</p>
+    <label>接口地址<input id="cfgBaseUrl" placeholder="https://api.siliconflow.cn/v1" /></label>
+    <label>模型<input id="cfgModel" placeholder="Qwen/Qwen3-ASR-1.7B" /></label>
+    <label>API Key<input id="cfgKey" type="password" placeholder="留空表示不修改" autocomplete="off" /></label>
+    <div class="row">
+          <label class="check"><input type="checkbox" id="optKeepAudio" /><span>保留录音片段（默认转完即删，不占空间）</span></label>
+      <label class="check"><input type="checkbox" id="optBubbleSound" /><span>机器人冒话时的提示音</span></label>
+      <label>最长一句（秒）<input id="cfgSeg" type="number" min="5" max="60" step="1" /></label>
+      <label>语言<input id="cfgLang" placeholder="zh" /></label>
+    </div>
+    <label>识别提示词<input id="cfgPrompt" placeholder="以下是大学课堂的中文讲解……" /></label>
+
+    <p class="group-label">笔记整理（DeepSeek）</p>
+    <label>接口地址<input id="cfgNotesUrl" placeholder="https://api.deepseek.com" /></label>
+    <label>模型<input id="cfgNotesModel" placeholder="deepseek-flash" /></label>
+    <label>API Key<input id="cfgNotesKey" type="password" placeholder="留空表示不修改" autocomplete="off" /></label>
+    <label>落盘位置（Obsidian 收件箱）<input id="cfgInbox" placeholder="D:\Obsidian\00-收件箱" /></label>
+
+    <div class="modal-actions">
+      <button class="ghost" id="btnCancel">取消</button>
+      <button class="btn-primary" id="btnSaveCfg">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="emotion-ball/js/rings.js"></script>
+<script src="emotion-ball/js/emotions.js"></script>
+<script src="emotion-ball/js/ball.js"></script>
+<script src="emotion-ball/js/engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
