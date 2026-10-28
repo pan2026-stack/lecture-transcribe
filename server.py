@@ -641,6 +641,38 @@ def _log(msg: str) -> None:
         pass
 
 
+CLIENT_LOG = LOGS / "client.log"
+
+
+def _log_client(payload: dict) -> None:
+    """浏览器端异常落盘，方便事后定位（不用再靠用户截图）"""
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        if CLIENT_LOG.exists() and CLIENT_LOG.stat().st_size > 2 * 1024 * 1024:
+            CLIENT_LOG.replace(CLIENT_LOG.with_suffix(".log.1"))
+        items = [
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            str(payload.get("kind") or "error"),
+            "view=" + str(payload.get("view") or "-"),
+            "running=" + str(payload.get("running")),
+            "segments=" + str(payload.get("segments")),
+            "serverDown=" + str(payload.get("serverDown")),
+            "msg=" + str(payload.get("message") or "")[:300].replace("\n", " "),
+        ]
+        ctx = payload.get("ctx")
+        if ctx:
+            items.append("ctx=" + str(ctx)[:200].replace("\n", " "))
+        line = " | ".join(items)
+        stack = str(payload.get("stack") or "")
+        with open(CLIENT_LOG, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+            if stack:
+                for part in stack.splitlines()[:8]:
+                    fh.write("    " + part.strip()[:200] + "\n")
+    except OSError:
+        pass
+
+
 def _notes_chat(cfg: dict, messages: list, max_tokens: int) -> tuple[str, str]:
     """调一次 DeepSeek（网络抖动/限流自动重试），返回（内容, finish_reason）"""
     key = cfg.get("notes_api_key") or ""
@@ -1630,6 +1662,14 @@ class Handler(SimpleHTTPRequestHandler):
             body = self.rfile.read(length) if length else b""
         except Exception:
             return self._json(400, {"error": "读取请求体失败"})
+
+        if route == "/api/client-log":
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:
+                payload = {}
+            _log_client(payload if isinstance(payload, dict) else {})
+            return self._json(200, {"ok": True})
 
         if route == "/api/config":
             try:

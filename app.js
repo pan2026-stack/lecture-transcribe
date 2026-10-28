@@ -287,6 +287,9 @@
       b.classList.remove('hidden');
     }
   });
+  // 自测钩子：确定性触发一次上报
+  window.__errTest = (msg) => reportClientError('qa', new Error(msg || 'qa error'), 'hook');
+
   window.addEventListener('error', (e) => {
     window.__lastError = (e.message || '') + ' @' + (e.lineno || '?');
     const b = $('banner');
@@ -1236,6 +1239,7 @@
       enqueueTranslate(rec);
       failStreak = 0;
     } catch (err) {
+      reportClientError('upload', err, `seq=${seq} time=${timeLabel}`);
       failStreak++;
       lastRecogErr = String(err.message || err).slice(0, 140);
       if (alive()) {
@@ -2119,6 +2123,7 @@
       showBanner(`保存失败：${data.error || '未知原因'}。稿子还在页面里，可以先点「生成笔记」重试。`);
       return false;
     } catch (err) {
+      reportClientError('save', err, `segments=${usable.length}`);
       syncNotesButton();
       showBanner(`保存失败：连不上本地服务（${err.message}）。桌面黑窗口可能被关了，重新启动后点「生成笔记」还能救回来。`);
       return false;
@@ -3383,6 +3388,7 @@
       await selectFile(data.notes_path);
       showBanner('已重新整理完成，同名旧文件已覆盖。', 6000);
     } catch (err) {
+      reportClientError('regen', err, `path=${path}`);
       clearGlobalProgress();
       const netErr = !err || /Failed to fetch|NetworkError|load failed/i.test(String(err.message || err));
       if (netErr) {
@@ -3406,6 +3412,49 @@
     const path = currentDocPath || regenSource;
     await startRegen(path, $('btnRegenNotes'));
   }
+
+  // ---------------------------------------------------------------- 错误上报
+  // 浏览器里的异常直接写到服务端 logs/client.log，事后不用再靠截图
+  const ERR_SENT = new Map();
+  let clientLogCount = 0;
+
+  function reportClientError(kind, err, ctx) {
+    try {
+      if (clientLogCount > 40) return;                 // 防止死循环刷日志
+      const msg = String((err && err.message) || err || '').slice(0, 300);
+      if (!msg) return;
+      const key = kind + '|' + msg;
+      const now = Date.now();
+      if (now - (ERR_SENT.get(key) || 0) < 8000) return;   // 同样的错 8 秒内只报一次
+      ERR_SENT.set(key, now);
+      clientLogCount += 1;
+      const body = JSON.stringify({
+        kind,
+        message: msg,
+        stack: String((err && err.stack) || '').slice(0, 2000),
+        view: typeof currentView === 'string' ? currentView : '-',
+        running: !!running,
+        segments: segments.length,
+        serverDown: !!serverDown,
+        url: location.href,
+        ua: navigator.userAgent.slice(0, 120),
+        ctx: ctx || '',
+      });
+      fetch('/api/client-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    } catch (_) { /* 上报本身不能出事 */ }
+  }
+
+  window.addEventListener('error', (e) => {
+    reportClientError('error', e.error || e.message, `src=${(e.filename || '').split('/').pop()}:${e.lineno}`);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    reportClientError('rejection', e.reason, '');
+  });
 
   // ---------------------------------------------------------------- 进度与连接状态
   const gpBox = $('globalProgress');
