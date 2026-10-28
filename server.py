@@ -392,7 +392,7 @@ def transcribe(wav: bytes, language: str) -> str:
     )
     ctx = ssl.create_default_context()
     try:
-        with urllib.request.urlopen(req, timeout=int(cfg.get("request_timeout", 90)), context=ctx) as resp:
+        with api_request(req, timeout=int(cfg.get("request_timeout", 90))) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             ctype_resp = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as exc:
@@ -704,6 +704,58 @@ def _log(msg: str) -> None:
 CLIENT_LOG = LOGS / "client.log"
 
 
+_SSL_CTX = ssl.create_default_context()
+_API_OPENER = None
+
+
+def _api_opener(target_url: str = "") -> urllib.request.OpenerDirector:
+    """返回带代理策略的 opener。
+
+    注意：不要用 urlopen(..., context=…)。CPython 在传 context 时会临时
+    build_opener(HTTPSHandler)，那样会丢掉我们设置的「直连」策略，又跑回系统代理。
+    """
+    global _API_OPENER
+    mode = str(load_config().get("api_proxy") or "direct").strip()
+    key = (mode, target_url.split("/")[2] if "//" in target_url else "")
+    if _API_OPENER is not None and _API_OPENER[0] == key:
+        return _API_OPENER[1]
+    if mode in ("", "direct", "none", "off"):
+        handler = urllib.request.ProxyHandler({})
+    elif mode == "system":
+        handler = urllib.request.ProxyHandler()
+    else:
+        handler = urllib.request.ProxyHandler({"http": mode, "https": mode})
+    opener = urllib.request.build_opener(
+        handler, urllib.request.HTTPSHandler(context=_SSL_CTX))
+    _API_OPENER = (key, opener)
+    return opener
+
+
+def api_request(req: urllib.request.Request, timeout: float = 30):
+    return _api_opener(req.full_url).open(req, timeout=timeout)
+
+
+def install_api_opener() -> None:
+    """按配置决定 API 请求走直连还是代理。
+
+    浏览器可能开着代理看视频，但 Python 这边的请求没必要跟着走；
+    国内接口（DeepSeek / 硅基流动）走系统代理经常 TLS 被断。
+    """
+    mode = str(load_config().get("api_proxy") or "direct").strip()
+    if mode in ("", "direct", "none", "off"):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        label = "直连（忽略系统代理）"
+    elif mode == "system":
+        opener = urllib.request.build_opener()
+        label = "跟随系统代理 " + str(urllib.request.getproxies().get("https") or "")
+    else:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": mode, "https": mode}))
+        label = "指定代理 " + mode
+    urllib.request.install_opener(opener)
+    _log(f"[net] API 请求使用：{label}")
+
+
 def _proxy_hint() -> str:
     """本机开了系统代理时，失败信息里带上它，省得误判成程序坏了"""
     try:
@@ -713,7 +765,8 @@ def _proxy_hint() -> str:
     proxy = proxies.get("https") or proxies.get("http") or ""
     if not proxy:
         return ""
-    return f"（当前走系统代理 {proxy}，如果一直失败，先关掉代理或换个节点再试）"
+    return (f"（配置项 api_proxy 现在是 system，走系统代理 {proxy}；"
+            f"国内接口建议改成 direct 直连）")
 
 
 def _log_client(payload: dict) -> None:
@@ -1265,7 +1318,7 @@ def _probe(base_url: str, key: str, timeout: int = 8) -> dict:
         "User-Agent": "lecture-transcribe/1.0",
     })
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as r:
+        with api_request(req, timeout=timeout) as r:
             body = json.loads(r.read().decode("utf-8", errors="replace"))
         n = len(body.get("data", [])) if isinstance(body, dict) else 0
         return {"ok": True, "msg": f"已连接（{n} 个模型）", "definitive": False}
@@ -1907,6 +1960,8 @@ def main():
     cfg = load_config()
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    install_api_opener()
 
     try:
         host = "::" if args.host in ("127.0.0.1", "localhost", "0.0.0.0") else args.host
