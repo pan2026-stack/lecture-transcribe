@@ -1973,19 +1973,13 @@
     // 2) 存转写稿
     updateJob(job, { detail: '保存转写稿…' });
     let saved = false;
-    try {
-      const res = await fetch('/api/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: meta.title, duration: meta.duration, segments: snapshot }),
-      });
-      const data = await res.json().catch(() => ({}));
-      saved = !!data.path;
-    } catch (_) {}
+    const saveRes = await postJsonRetry('/api/save',
+      { title: meta.title, duration: meta.duration, segments: snapshot }, 4, 1500);
+    if (saveRes.ok) saved = !!saveRes.data.path;
 
     if (!saved) {
-      updateJob(job, { status: 'error', detail: '转写稿没存成，检查黑窗口是否还在运行' });
-      notice('稿子没存上，黑窗口还开着吗？', '', 15000);
+      updateJob(job, { status: 'error', detail: '转写稿没存成（服务未响应）' });
+      notice('稿子没存上，本地服务好像断了。刷新页面后这一节还在，重新点「结束并保存」即可。', '', 20000);
       return;
     }
 
@@ -2008,13 +2002,24 @@
       });
       let res;
       try {
+        // 服务可能正在重启：失败等 3 秒再试一次（任务 id 不变，进度能接上）
         res = await fetch('/api/notes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             title: meta.title, duration: meta.duration, segments: snapshot, job: notesJob,
           }),
-        });
+        }).catch(() => null);
+        if (!res || !res.ok) {
+          await new Promise((r) => setTimeout(r, 3000));
+          res = await fetch('/api/notes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: meta.title, duration: meta.duration, segments: snapshot, job: notesJob + 'b',
+            }),
+          });
+        }
       } finally {
         stopWatch();
       }
@@ -2032,8 +2037,8 @@
       setTimeout(() => { if (!running) setEmotion('02'); }, 4000);
       elFoot.textContent = '上一节处理完了：点气泡，或到「处理」里看。';
     } else {
-      updateJob(job, { status: 'error', detail: '整理失败，可到「历史」查看转写稿' });
-      notice('整理没成，稿子还在，去处理里翻。', '', 15000);
+      updateJob(job, { status: 'error', detail: '整理没成，转写稿已保存' });
+      notice('整理没成，但转写稿已经存下来了。到「处理」里找到这一节，点右侧「重新整理」就能再来一次。', '', 25000);
       setEmotion('34');
     }
       setTimeout(() => setEmotion('15'), 2400);
@@ -3338,6 +3343,28 @@
   async function regenNotes() {
     const path = currentDocPath || regenSource;
     await startRegen(path, $('btnRegenNotes'));
+  }
+
+  // 带重试的 POST：服务重启/网络抖动时多试几次，别一次失败就判死
+  async function postJsonRetry(url, payload, tries = 3, gap = 2000) {
+    let lastErr = null;
+    for (let i = 0; i < tries; i += 1) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && !data.error) return { ok: true, data };
+        lastErr = new Error(data.error || `HTTP ${res.status}`);
+        if (res.status >= 400 && res.status < 500) return { ok: false, error: lastErr };
+      } catch (err) {
+        lastErr = err;
+      }
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, gap * (i + 1)));
+    }
+    return { ok: false, error: lastErr };
   }
 
   // ---------------------------------------------------------------- 处理页

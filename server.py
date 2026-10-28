@@ -619,6 +619,28 @@ def _progress(job: str, **kw) -> None:
         NOTES_PROGRESS.pop(k, None)
 
 
+LOG_PATH = LOGS / "server.log"
+
+
+def _log(msg: str) -> None:
+    """写文件日志：pythonw 没有控制台，崩溃和看门狗决策只能落盘"""
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > 2 * 1024 * 1024:
+            LOG_PATH.replace(LOG_PATH.with_suffix(".log.1"))
+        with open(LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+    try:
+        if sys.stdout:
+            print(line)
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def _notes_chat(cfg: dict, messages: list, max_tokens: int) -> tuple[str, str]:
     """调一次 DeepSeek（网络抖动/限流自动重试），返回（内容, finish_reason）"""
     key = cfg.get("notes_api_key") or ""
@@ -719,36 +741,48 @@ def _probe_outbound() -> bool:
         return False
 
 
+def _watchdog_tick() -> bool:
+    """跑一次探针。返回 True 表示应当退出重启。独立成函数便于测试"""
+    interval_threshold = int(os.environ.get("DICT_PROBE_FAILS", "3"))
+    WATCHDOG["last_check"] = time.time()
+    if not _probe_outbound():
+        WATCHDOG["fails"] += 1
+        _log(f"[watchdog] 出网探测失败，连续 {WATCHDOG['fails']} 次")
+    else:
+        if WATCHDOG["fails"]:
+            _log(f"[watchdog] 出网恢复（之前连续失败 {WATCHDOG['fails']} 次）")
+        WATCHDOG["fails"] = 0
+        WATCHDOG["last_alive"] = time.time()
+
+    if WATCHDOG["fails"] < interval_threshold:
+        return False
+
+    # 有任务在生成：绝对不能重启，否则那一次整理直接丢
+    busy_jobs = [k for k, v in NOTES_PROGRESS.items()
+                 if v.get("stage") not in ("done", "error", "unknown")]
+    if busy_jobs:
+        _log(f"[watchdog] 出网失败 {WATCHDOG['fails']} 次，但 {len(busy_jobs)} 个生成任务在跑，先不动")
+        return False
+
+    idle_for = time.time() - LAST_ACTIVITY[0]
+    strict = bool(load_config().get("watchdog_strict", False))
+    if strict and idle_for < 90:
+        _log(f"[watchdog] 出网失败 {WATCHDOG['fails']} 次，但 {idle_for:.0f}s 前还有请求，严格模式暂不重启")
+        return False
+
+    _log(f"[watchdog] 出网连续失败 {WATCHDOG['fails']} 次（空闲 {idle_for:.0f}s），主动退出等待守护重启")
+    return True
+
+
 def _watchdog_loop():
     interval = float(os.environ.get("DICT_PROBE_SECONDS", "45"))
-    threshold = int(os.environ.get("DICT_PROBE_FAILS", "3"))
     while True:
         time.sleep(interval)
         try:
-            WATCHDOG["last_check"] = time.time()
-            if not _probe_outbound():
-                WATCHDOG["fails"] += 1
-            else:
-                WATCHDOG["fails"] = 0
-                WATCHDOG["last_alive"] = time.time()
-            if WATCHDOG["fails"] < threshold:
-                continue
-            # 连续多次出网失败
-            idle_for = time.time() - LAST_ACTIVITY[0]
-            busy_jobs = [k for k, v in NOTES_PROGRESS.items()
-                         if v.get("stage") not in ("done", "error", "unknown")]
-            strict = bool(load_config().get("watchdog_strict", False))
-            if strict and (idle_for < 90 or busy_jobs):
-                print(f"[watchdog] 出网失败 {WATCHDOG['fails']} 次，但正在使用中"
-                      f"（{idle_for:.0f}s 前有请求 / {len(busy_jobs)} 个任务在跑），严格模式暂不重启")
-                continue
-            print(f"[watchdog] 出网连续失败 {WATCHDOG['fails']} 次（宽松模式按策略重启，"
-                  f"空闲 {idle_for:.0f}s / 任务 {len(busy_jobs)} 个），主动退出等待守护重启")
-            print(f"[watchdog] 出网连续失败 {WATCHDOG['fails']} 次且已空闲 {idle_for:.0f}s，主动退出等待守护重启")
-            sys.stdout.flush()
-            os._exit(9)          # 交给外层守护进程拉起
-        except Exception as exc:   # 看门狗自己不能崩
-            print(f"[watchdog] 检查异常：{exc}")
+            if _watchdog_tick():
+                os._exit(9)          # 交给外层守护进程拉起
+        except Exception as exc:      # 看门狗自己不能崩
+            _log(f"[watchdog] 检查异常：{exc}")
 
 
 def start_watchdog():
@@ -1487,6 +1521,20 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(blob)
         except (ConnectionError, OSError) as exc:
             LOG.warning("写响应失败（客户端已断开）%s %s", self.path, exc)
+
+    def _safe_handle(self, fn):
+        try:
+            return fn()
+        except (ConnectionError, BrokenPipeError):
+            raise
+        except Exception:
+            import traceback
+            detail = traceback.format_exc()
+            _log(f"[error] {self.command} {self.path}\n{detail}")
+            try:
+                return self._json(500, {"error": f"服务端异常：{detail.splitlines()[-1][:160]}"})
+            except Exception:
+                return None
 
     def do_GET(self):
         self._log_line(f"GET  {self.path}  from {self.client_address[0]}")
