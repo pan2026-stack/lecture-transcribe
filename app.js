@@ -3397,6 +3397,11 @@
     const label = btn ? btn.textContent : '';
     const job = 'r' + Date.now().toString(36);
     if (btn) { btn.disabled = true; btn.textContent = '整理中…'; }
+
+    // 建一条任务记录：处理页能看到进度，刷新后也能接续
+    const uiJob = startJob(`重新整理 ${String(title).slice(0, 16)}`);
+    updateJob(uiJob, { detail: '整理讲稿和笔记…', pct: 4 });
+
     hideBanner();
     beginProgress('正在整理讲稿和笔记…');
     try {
@@ -3405,16 +3410,24 @@
         const pct = progressPct(d);
         if (pct != null) updateProgress(pct, text);
         if (text && btn) btn.textContent = text;
-      });
+        if (pct != null || text) {
+          updateJob(uiJob, { detail: text || uiJob.detail, pct: pct == null ? uiJob.pct : pct });
+        }
+      }, uiJob);
       const res = { ok: true, status: 200 };
       if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
       finishProgress('整理完成');
+      updateJob(uiJob, {
+        status: 'done', detail: '已重新整理完成', pct: 100,
+        article: data.article_path, notes: data.notes_path,
+      });
       hideBanner();
       await loadFiles();
       await selectFile(data.notes_path);
       showBanner('已重新整理完成，同名旧文件已覆盖。', 6000);
     } catch (err) {
       reportClientError('regen', err, `path=${path}`);
+      updateJob(uiJob, { status: 'error', detail: String((err && err.message) || err).slice(0, 40), pct: 100 });
       clearGlobalProgress();
       const netErr = !err || /Failed to fetch|NetworkError|load failed/i.test(String(err.message || err));
       if (netErr) {

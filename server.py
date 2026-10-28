@@ -704,6 +704,18 @@ def _log(msg: str) -> None:
 CLIENT_LOG = LOGS / "client.log"
 
 
+def _proxy_hint() -> str:
+    """本机开了系统代理时，失败信息里带上它，省得误判成程序坏了"""
+    try:
+        proxies = urllib.request.getproxies()
+    except Exception:
+        return ""
+    proxy = proxies.get("https") or proxies.get("http") or ""
+    if not proxy:
+        return ""
+    return f"（当前走系统代理 {proxy}，如果一直失败，先关掉代理或换个节点再试）"
+
+
 def _log_client(payload: dict) -> None:
     """浏览器端异常落盘，方便事后定位（不用再靠用户截图）"""
     try:
@@ -779,7 +791,9 @@ def _notes_chat(cfg: dict, messages: list, max_tokens: int) -> tuple[str, str]:
             if attempt < len(backoff):
                 time.sleep(backoff[attempt])
                 continue
-            raise RuntimeError(f"连不上 {url}（已重试 {len(backoff)} 次）：{last_err}。检查网络或代理后重试。") from None
+            raise RuntimeError(
+            f"连不上 {url}（已重试 {len(backoff)} 次）：{last_err}。"
+            f"{_proxy_hint()}检查网络后重试。") from None
         except json.JSONDecodeError:
             raise RuntimeError("DeepSeek 返回的不是合法 JSON。") from None
         except (KeyError, IndexError, TypeError):
