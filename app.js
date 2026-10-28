@@ -4140,7 +4140,7 @@
 
   if (location.search.includes('selftest=jobclick')) {
     setTimeout(() => {
-      const f = 'D:\\知识库\\02-笔记\\课堂笔记-课堂 1025 0845-2026-10-25-0846.md';
+      const f = 'D:\\Obsidian\\02-笔记\\课堂笔记-示例课程-2026-01-01-1200.md';
       jobs.unshift({ id: Date.now(), title: '自测 任务卡点击', status: 'done',
         detail: '讲稿和笔记都已生成', ts: Date.now(), notes: f });
       renderJobs();
@@ -4158,7 +4158,7 @@
   }
 
   if (location.search.includes('selftest=done')) {
-    setTimeout(() => notice(pickDoneLine(), 'D:\\\\知识库\\\\00-收件箱\\\\_收件箱说明.md', 25000), 600);
+    setTimeout(() => notice(pickDoneLine(), 'D:\\\\Obsidian\\\\00-收件箱\\\\_收件箱说明.md', 25000), 600);
   }
 
   if (location.search.includes('selftest=fallback')) {

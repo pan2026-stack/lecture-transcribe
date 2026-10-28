@@ -7,7 +7,7 @@ import sys
 import time
 import urllib.request
 
-ROOT = pathlib.Path(r'C:\Users\92182\Documents\deepseek-harness\default-workspace\lecture-transcribe')
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 PORT = 8893
 BASE = f'http://127.0.0.1:{PORT}'
 
