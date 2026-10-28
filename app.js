@@ -437,7 +437,18 @@
     });
   }
 
+  let healthChecking = false;
   async function checkHealth() {
+    if (healthChecking) return;
+    healthChecking = true;
+    try {
+      await checkHealthOnce();
+    } finally {
+      healthChecking = false;
+    }
+  }
+
+  async function checkHealthOnce() {
     setEmotion('36');                // 联网加载
     paintConn(elConnAsr, 'checking', '正在检测硅基流动…');
     paintConn(elConnNotes, 'checking', '正在检测 DeepSeek…');
@@ -1932,14 +1943,14 @@
     updateRecoverBtn();
     setView('jobs');
 
+    persistSession();  // 保留恢复副本，直到服务端确认转写稿已经落盘
     finishSession(snapshotSource, pending, {
       title: sessionTitle || defaultTitle(),
       duration: elClock.textContent,
       session: sessionId,
     });
 
-    // 本节已交给后台，转写区清空，方便直接开始下一节；内容在「历史」里
-    clearStored();
+    // 本节已交给后台；恢复副本由 finishSession 在保存成功后清除。
     elTranscript.innerHTML = '<p class="empty">本节已交给后台保存和整理，内容可在「历史」里查看。点「开始听课」录下一节。</p>';
     const badge2 = $('txMode');
     if (badge2) badge2.classList.add('hidden');
@@ -2012,6 +2023,8 @@
       return;
     }
 
+    if (segments === source && !running) clearStored();
+
     if (!notesReady) {
       updateJob(job, { status: 'done', detail: '只存了转写稿（未配置 DeepSeek KEY）' });
       notice('稿子存好啦，但没配钥匙，整理不了。', '', 15000);
@@ -2025,51 +2038,17 @@
     setTimeout(() => setEmotion('30'), 900);
     let out = null;
     try {
-      const notesJob = 'j' + Date.now().toString(36);
-      const stopWatch = watchNotesProgress(notesJob, (d) => {
+      out = await requestNotes({
+        title: meta.title, duration: meta.duration, segments: snapshot,
+      }, (d) => {
         const text = progressText(d);
         const pct = progressPct(d);
         if (pct != null) updateProgress(pct, text || job.detail);
         if (text) updateJob(job, { detail: text, pct: pct == null ? job.pct : pct });
-      });
-      let res;
-      try {
-        // 服务可能正在重启：失败等 3 秒再试一次（任务 id 不变，进度能接上）
-        res = await fetch('/api/notes', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: meta.title, duration: meta.duration, segments: snapshot, job: notesJob,
-          }),
-        }).catch(() => null);
-        if (!res || !res.ok) {
-          await new Promise((r) => setTimeout(r, 3000));
-          res = await fetch('/api/notes', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              title: meta.title, duration: meta.duration, segments: snapshot, job: notesJob + 'b',
-            }),
-          }).catch(() => null);
-        }
-        if (!res || !res.ok) {
-          // 服务在重启：等它回来，再试最后一次
-          if (await waitForServer(45000)) {
-            res = await fetch('/api/notes', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                title: meta.title, duration: meta.duration, segments: snapshot, job: notesJob + 'c',
-              }),
-            }).catch(() => null);
-          }
-        }
-      } finally {
-        stopWatch();
-      }
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && !data.error) out = data;
-    } catch (_) {}
+      }, job);
+    } catch (err) {
+      reportClientError('finish-notes', err, '');
+    }
 
     if (out && out.notes_path) {
       finishProgress('整理完成');
@@ -2321,16 +2300,12 @@
     const label = btnNotes.textContent;
     btnNotes.textContent = '整理中…';
     try {
-      const res = await fetch('/api/notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: `课堂 ${new Date().toLocaleDateString('zh-CN')}`,
-          duration: durationText(),
-          segments: usable.map((s) => ({ time: s.time, text: s.text })),
-        }),
-      });
-      const data = await res.json();
+      const data = await requestNotes({
+        title: `课堂 ${new Date().toLocaleDateString('zh-CN')}`,
+        duration: durationText(),
+        segments: usable.map((seg) => ({ time: seg.time, text: seg.text })),
+      }, null, job);
+      const res = { ok: true, status: 200 };
       if (!res.ok || data.error) {
         notesBody.innerHTML = '';
         notesModal.classList.add('hidden');
@@ -2652,7 +2627,8 @@
       const list = JSON.parse(raw);
       if (Array.isArray(list)) {
         // 上次没跑完的标记为中断，避免一直显示处理中
-        jobs = list.map((j) => (j.status === 'running' ? { ...j, status: 'error', detail: '页面刷新导致中断' } : j));
+        jobs = list.map((j) => (j.status === 'running' && !j.serverJob
+          ? { ...j, status: 'error', detail: '保存尚未完成，请检查转写稿后重试' } : j));
       }
     } catch (_) {}
   }
@@ -3328,18 +3304,73 @@
     return out;
   }
 
-  // 轮询生成进度，把「第几段」显示出来
-  function watchNotesProgress(job, onText) {
-    let stopped = false;
-    const timer = setInterval(async () => {
-      if (stopped) return;
+  // Submit once, then use short requests. A lost response must not generate a
+  // second task, and a temporary disconnect must not discard a running task.
+  async function localJson(url, options = {}, timeoutMs = 8000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: ctrl.signal, cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        const err = new Error(data.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      return data;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function pollNotesTask(id, onProgress) {
+    for (;;) {
+      let state;
       try {
-        const res = await fetch('/api/notes-progress?job=' + encodeURIComponent(job));
-        const d = await res.json();
-        if (d && d.stage && d.stage !== 'unknown') onText(d);
-      } catch (_) { /* 轮询失败不影响主请求 */ }
-    }, 1200);
-    return () => { stopped = true; clearInterval(timer); };
+        state = await localJson('/api/notes-progress?job=' + encodeURIComponent(id));
+      } catch (err) {
+        if (err.status && err.status < 500) throw err;
+        await sleep(1200);
+        continue;
+      }
+      if (state.stage === 'unknown') {
+        throw new Error('整理任务已不存在（服务可能重启过），请从已保存的转写稿重新整理。');
+      }
+      if (state.stage === 'error') throw new Error(state.error || state.text || '整理失败');
+      if (onProgress) onProgress(state);
+      if (state.stage === 'done' && state.result) return state.result;
+      await sleep(1200);
+    }
+  }
+
+  async function requestNotes(payload, onProgress, uiJob) {
+    const id = payload.job || ('j' + window.crypto.randomUUID());
+    if (uiJob) updateJob(uiJob, { serverJob: id });
+    const body = JSON.stringify({ ...payload, job: id, background: true });
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await localJson('/api/notes', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+        });
+        break;
+      } catch (err) {
+        if ((err.status && err.status < 500) || attempt >= 3) throw err;
+        await sleep(1500 * (attempt + 1));
+      }
+    }
+    return pollNotesTask(id, onProgress);
+  }
+
+  async function resumeNotesJob(job) {
+    try {
+      const data = await pollNotesTask(job.serverJob, (d) => {
+        updateJob(job, { detail: progressText(d) || '正在整理…', pct: progressPct(d) });
+      });
+      updateJob(job, { status: 'done', detail: '讲稿和笔记都已生成', pct: 100,
+        article: data.article_path, notes: data.notes_path });
+    } catch (err) {
+      updateJob(job, { status: 'error', detail: err.message });
+    }
   }
 
   function progressText(d) {
@@ -3368,19 +3399,14 @@
     if (btn) { btn.disabled = true; btn.textContent = '整理中…'; }
     hideBanner();
     beginProgress('正在整理讲稿和笔记…');
-    const stopWatch = watchNotesProgress(job, (d) => {
-      const text = progressText(d);
-      const pct = progressPct(d);
-      if (pct != null) updateProgress(pct, text);
-      if (text && btn) btn.textContent = text;   // 顶部进度面板已经在显示，不再重复刷横幅
-    });
     try {
-      const res = await fetch('/api/notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, segments: segs, job }),
+      const data = await requestNotes({ title, segments: segs, job }, (d) => {
+        const text = progressText(d);
+        const pct = progressPct(d);
+        if (pct != null) updateProgress(pct, text);
+        if (text && btn) btn.textContent = text;
       });
-      const data = await res.json().catch(() => ({}));
+      const res = { ok: true, status: 200 };
       if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
       finishProgress('整理完成');
       hideBanner();
@@ -3402,7 +3428,6 @@
         showBanner(`重新整理失败：${err.message}`);
       }
     } finally {
-      stopWatch();
       if (btn) { btn.disabled = false; btn.textContent = label || '重新整理成笔记'; }
     }
   }
@@ -3573,23 +3598,29 @@
 
   function startServerWatch() {
     if (serverPingTimer) return;
+    let checking = false;
+    let failures = 0;
     serverPingTimer = setInterval(async () => {
-      if (document.hidden) return;
-      const ok = await pingServer();
-      if (!ok && !serverDown) {
-        serverDown = true;
-        serverDownAt = Date.now();
-        showServerAlert('本地服务连不上了，正在等它重启…');
-        // 断开期间别让用户以为在整理
-        if (gpBox && !gpBox.classList.contains('hidden') && gpLabel) {
-          gpLabel.textContent = '服务重启中…';
+      if (document.hidden || checking) return;
+      checking = true;
+      try {
+        const ok = await pingServer();
+        failures = ok ? 0 : failures + 1;
+        if (!ok && failures < 3) return;
+        if (!ok && !serverDown) {
+          serverDown = true;
+          serverDownAt = Date.now();
+          showServerAlert('暂时无法连接本地服务，正在自动重连…');
+        } else if (ok && serverDown) {
+          serverDown = false;
+          showServerAlert('服务已恢复，正在继续查询处理结果', 'recovered');
+          renderProgress();
+          setTimeout(() => { if (!serverDown) hideServerAlert(); }, 2600);
+        } else if (!ok && serverDown && Date.now() - serverDownAt > 45000) {
+          showServerAlert('本地服务仍未响应，正在重连；若窗口已退出，请重新启动程序', 'failed');
         }
-      } else if (ok && serverDown) {
-        serverDown = false;
-        showServerAlert('服务已恢复', 'recovered');
-        setTimeout(hideServerAlert, 2600);
-      } else if (!ok && serverDown && Date.now() - serverDownAt > 45000) {
-        showServerAlert('服务启动失败，请双击桌面「课堂转写」图标重启', 'failed');
+      } finally {
+        checking = false;
       }
     }, 3000);
   }
@@ -3942,6 +3973,7 @@
   initBubbleSound();
   startServerWatch();
   loadJobs();
+  jobs.filter((job) => job.status === 'running' && job.serverJob).forEach(resumeNotesJob);
   renderJobs();
   startJobsAutoRefresh();
   window.addEventListener('focus', () => {

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -84,10 +85,9 @@ DEFAULT_CONFIG = {
     "obsidian_inbox": "",
     # 重新生成时，把知识库里同名旧文件归档到 99-归档（不直接删）
     "archive_old_notes": True,
-    # 看门狗：出网连续失败时主动退出等待守护重启
-    # "watchdog_strict": False -> 宽松：不管有没有在录音都会重启
-    # "watchdog_strict": True  -> 严格：录音/整理期间不重启
-    "watchdog_restart": True,
+    # 自动重启默认关闭；显式启用还必须由 DICT_SUPERVISED=1 声明外部守护。
+    # 无论旧配置 watchdog_strict 如何，近期有请求或有整理任务时均不退出。
+    "watchdog_restart": False,
     "watchdog_strict": False,
     # 延伸阅读最多给几条；4 是「一屏扫完」的经验值，可改
     "reading_list_max": 4,
@@ -604,19 +604,79 @@ def write_note_file(
 
 # 生成笔记的实时进度（job id -> 进度），供前端轮询
 NOTES_PROGRESS: dict[str, dict] = {}
+NOTES_LOCK = threading.RLock()
+NOTES_TASKS: dict[str, dict] = {}
+ACTIVE_NOTES = 0
+
+
+def notes_task_status(job: str) -> dict:
+    with NOTES_LOCK:
+        task = NOTES_TASKS.get(job)
+        if task is None:
+            return dict(NOTES_PROGRESS.get(job) or {"stage": "unknown"})
+        if task["stage"] in ("done", "error"):
+            return {k: v for k, v in task.items() if k != "fingerprint"}
+        progress = dict(NOTES_PROGRESS.get(job) or {"stage": "start", "text": "正在准备"})
+        if progress.get("stage") in ("done", "error"):
+            progress["stage"] = "save"  # worker has not published its result yet
+        return progress
+
+
+def submit_notes(payload: dict) -> dict:
+    job = str(payload.get("job") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", job):
+        raise ValueError("后台整理需要有效的 job 编号")
+    fingerprint = hashlib.sha256(json.dumps(
+        {k: v for k, v in payload.items() if k != "background"},
+        sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    with NOTES_LOCK:
+        now = time.time()
+        for old in list(NOTES_TASKS):
+            task = NOTES_TASKS[old]
+            if task["stage"] in ("done", "error") and now - task["at"] > 86400:
+                del NOTES_TASKS[old]
+        existing = NOTES_TASKS.get(job)
+        if existing:
+            if existing["fingerprint"] != fingerprint:
+                raise ValueError("同一 job 编号不能用于不同的转写内容")
+            return {"job": job, "accepted": True}
+        if sum(t["stage"] not in ("done", "error") for t in NOTES_TASKS.values()) >= 4:
+            raise RuntimeError("正在整理的任务过多，请稍后再试")
+        NOTES_TASKS[job] = {"stage": "start", "at": now, "fingerprint": fingerprint}
+
+    def work():
+        try:
+            result = generate_notes(payload)
+            state = {"stage": "done", "result": result}
+        except Exception as exc:
+            state = {"stage": "error", "error": str(exc), "text": str(exc)}
+        with NOTES_LOCK:
+            NOTES_TASKS[job].update(state, at=time.time())
+
+    try:
+        threading.Thread(target=work, name="notes-" + job, daemon=True).start()
+    except Exception:
+        with NOTES_LOCK:
+            NOTES_TASKS.pop(job, None)
+        raise
+    return {"job": job, "accepted": True}
+
 
 
 def _progress(job: str, **kw) -> None:
     if not job:
         return
-    cur = NOTES_PROGRESS.get(job) or {}
-    cur.update(kw)
-    cur["at"] = time.time()
-    NOTES_PROGRESS[job] = cur
-    # 顺手清掉 10 分钟前的记录
-    now = time.time()
-    for k in [k for k, v in NOTES_PROGRESS.items() if now - v.get("at", now) > 600]:
-        NOTES_PROGRESS.pop(k, None)
+    with NOTES_LOCK:
+        cur = dict(NOTES_PROGRESS.get(job) or {})
+        cur.update(kw)
+        cur["at"] = time.time()
+        NOTES_PROGRESS[job] = cur
+        # Never expire an active long lecture while another task reports progress.
+        now = time.time()
+        for k in list(NOTES_PROGRESS):
+            v = NOTES_PROGRESS[k]
+            if v.get("stage") in ("done", "error") and now - v.get("at", now) > 86400:
+                NOTES_PROGRESS.pop(k, None)
 
 
 LOG_PATH = LOGS / "server.log"
@@ -757,19 +817,16 @@ def _touch():
 
 
 def _probe_outbound() -> bool:
-    """只做 TCP 握手，不消耗接口额度"""
+    """Use the application's HTTPS/proxy route; HTTP errors still prove reachability."""
     cfg = load_config()
     url = os.environ.get("DICT_PROBE_TARGET") or cfg.get("notes_base_url") or "https://api.deepseek.com"
     try:
-        host = urllib.parse.urlparse(url).hostname or "api.deepseek.com"
-    except Exception:
-        host = "api.deepseek.com"
-    port = 443 if url.startswith("https") else 80
-    try:
-        sock = socket.create_connection((host, port), timeout=6)
-        sock.close()
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=6):
+            return True
+    except urllib.error.HTTPError:
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -789,17 +846,19 @@ def _watchdog_tick() -> bool:
     if WATCHDOG["fails"] < interval_threshold:
         return False
 
-    # 有任务在生成：绝对不能重启，否则那一次整理直接丢
-    busy_jobs = [k for k, v in NOTES_PROGRESS.items()
-                 if v.get("stage") not in ("done", "error", "unknown")]
-    if busy_jobs:
-        _log(f"[watchdog] 出网失败 {WATCHDOG['fails']} 次，但 {len(busy_jobs)} 个生成任务在跑，先不动")
+    # Remote network failures do not mean this HTTP server is broken. In
+    # particular the debug launcher has no supervisor to bring it back.
+    if os.environ.get("DICT_SUPERVISED") != "1":
         return False
-
+    with NOTES_LOCK:
+        busy = ACTIVE_NOTES or any(t["stage"] not in ("done", "error")
+                                  for t in NOTES_TASKS.values()) or any(
+            v.get("stage") not in ("done", "error", "unknown")
+            for v in NOTES_PROGRESS.values())
+    if busy:
+        return False
     idle_for = time.time() - LAST_ACTIVITY[0]
-    strict = bool(load_config().get("watchdog_strict", False))
-    if strict and idle_for < 90:
-        _log(f"[watchdog] 出网失败 {WATCHDOG['fails']} 次，但 {idle_for:.0f}s 前还有请求，严格模式暂不重启")
+    if idle_for < 90:
         return False
 
     _log(f"[watchdog] 出网连续失败 {WATCHDOG['fails']} 次（空闲 {idle_for:.0f}s），主动退出等待守护重启")
@@ -818,14 +877,26 @@ def _watchdog_loop():
 
 
 def start_watchdog():
-    if not load_config().get("watchdog_restart", True):
-        print("[watchdog] 已关闭（watchdog_restart=false）")
+    if not load_config().get("watchdog_restart", False) or os.environ.get("DICT_SUPERVISED") != "1":
+        print("[watchdog] 自动重启未启用（需要显式配置且存在外部守护进程）")
         return
     threading.Thread(target=_watchdog_loop, name="watchdog", daemon=True).start()
     print("[watchdog] 已启动：每 45 秒探一次出网，连续 3 次失败且空闲时自动重启")
 
 
 def generate_notes(payload: dict) -> dict:
+    global ACTIVE_NOTES
+    with NOTES_LOCK:
+        ACTIVE_NOTES += 1
+    try:
+        return _generate_notes(payload)
+    finally:
+        with NOTES_LOCK:
+            ACTIVE_NOTES -= 1
+        _touch()
+
+
+def _generate_notes(payload: dict) -> dict:
     """把转写稿交给 DeepSeek：产出「整理后的完整讲稿」+「结构化笔记」两份文件"""
     cfg = load_config()
     job = str(payload.get("job") or "")
@@ -1579,7 +1650,7 @@ class Handler(SimpleHTTPRequestHandler):
             cfg = load_config()
             now = time.time()
             return self._json(200, {
-                "enabled": bool(cfg.get("watchdog_restart", True)),
+                "enabled": bool(cfg.get("watchdog_restart", False)),
                 "strict": bool(cfg.get("watchdog_strict", False)),
                 "fails": WATCHDOG["fails"],
                 "last_check": WATCHDOG["last_check"],
@@ -1594,7 +1665,7 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/notes-progress":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             job = (qs.get("job") or [""])[0]
-            return self._json(200, NOTES_PROGRESS.get(job) or {"stage": "unknown"})
+            return self._json(200, notes_task_status(job))
 
         if route == "/api/config":
             return self._json(200, public_config(load_config()))
@@ -1754,7 +1825,14 @@ class Handler(SimpleHTTPRequestHandler):
 
         if route == "/api/notes":
             try:
-                return self._json(200, generate_notes(json.loads(body or b"{}")))
+                payload = json.loads(body or b"{}")
+                if payload.get("background"):
+                    try:
+                        accepted = submit_notes(payload)
+                    except ValueError as exc:
+                        return self._json(409, {"error": str(exc)})
+                    return self._json(202, accepted)
+                return self._json(200, generate_notes(payload))
             except RuntimeError as exc:
                 return self._json(400, {"error": str(exc)})
             except Exception as exc:
