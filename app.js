@@ -1818,6 +1818,7 @@
     btnBackfill.classList.add('hidden');
     elTranscript.innerHTML = '';
     clearStored();
+    resetShots();                       // 新的一节课，截图重新计数
     const badge = $('txMode');
     if (badge) badge.classList.add('hidden');
     const wrap = document.querySelector('.transcript-wrap');
@@ -1895,8 +1896,7 @@
     setMainState('busy');
     // 看门狗：万一收尾里某一步卡住，15 秒后把按钮放回来，不至于永远卡着
     const watchdog = setTimeout(() => {
-      resetShots();                       // 新的一节课，截图从头计数
-    if (mainState === 'busy') setMainState('recording');
+      if (mainState === 'busy') setMainState('recording');
     }, 15000);
     hideBanner();
     elSegInfo.textContent = '正在收尾…';
@@ -2011,15 +2011,20 @@
       return;
     }
 
-    // 2) 存转写稿
+    // 2) 存转写稿（连同截图清单一起存，重新整理时才不会丢图）
     updateJob(job, { detail: '保存转写稿…' });
+    // 刚按的快门可能还在上传，等它落盘再统计
+    for (let guard = 0; guard < 40 && pendingShot; guard += 1) {
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    const shotList = shots.map((x) => ({ sec: x.sec, name: x.name }));
     let saved = false;
     let saveRes = await postJsonRetry('/api/save',
-      { title: meta.title, duration: meta.duration, segments: snapshot }, 4, 1500);
+      { title: meta.title, duration: meta.duration, segments: snapshot, shots: shotList }, 4, 1500);
     if (!saveRes.ok && await waitForServer(45000)) {
       // 服务刚重启回来，再给一次机会
       saveRes = await postJsonRetry('/api/save',
-        { title: meta.title, duration: meta.duration, segments: snapshot }, 2, 1500);
+        { title: meta.title, duration: meta.duration, segments: snapshot, shots: shotList }, 2, 1500);
     }
     if (saveRes.ok) saved = !!saveRes.data.path;
 
@@ -2045,7 +2050,7 @@
     let out = null;
     try {
       out = await requestNotes({
-        title: meta.title, duration: meta.duration, segments: snapshot, shots,
+        title: meta.title, duration: meta.duration, segments: snapshot, shots: shotList,
       }, (d) => {
         const text = progressText(d);
         const pct = progressPct(d);
@@ -2168,8 +2173,16 @@
     '案例': 'case', '对比': 'compare', '原则': 'principle', '风险': 'risk',
   };
 
+  function escHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   function mdToHtml(md) {
-    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const esc = (s) => String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     const inline = (s) => s
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -2180,7 +2193,12 @@
       .replace(/!\[\[([^\]|]+?\.(?:jpe?g|png|webp|gif))(?:\|[^\]]*)?\]\]/gi,
         (m, name) => `<img class="note-img" loading="lazy" alt="课堂截图" src="/api/shot?name=${encodeURIComponent(name)}">`)
       .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g,
-        (m, alt, src) => `<img class="note-img" loading="lazy" alt="${alt || '课堂截图'}" src="${src}">`)
+        (m, alt, src) => {
+          // alt 来自 markdown，必须转义引号，否则能拼出 onerror 之类的属性
+          const safeAlt = String(alt || '课堂截图').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+          const safeSrc = String(src).replace(/"/g, '%22').replace(/</g, '%3C');
+          return `<img class="note-img" loading="lazy" alt="${safeAlt}" src="${safeSrc}">`;
+        })
       .replace(/\[(\d{1,3}:\d{2}(?::\d{2})?)\]/g, '<a class="ts-jump" data-t="$1">$1</a>')
       // （理论）（现状）（方法）（案例）（对比） -> 彩色胶囊
       .replace(/（(理论|现状|方法|案例|对比|原则|风险)）/g, (m, k) =>
@@ -2233,7 +2251,7 @@
       return;
     }
     notesNav.innerHTML = '<h4>章节速览</h4>'
-      + rows.map((r) => `<a data-t="${r.t}"><b>${r.t}</b>${r.title}</a>`).join('');
+      + rows.map((r) => `<a data-t="${escHtml(r.t)}"><b>${escHtml(r.t)}</b>${escHtml(r.title)}</a>`).join('');
   }
 
   // 右栏：完整原文（纯文本，跟着走）
@@ -2315,6 +2333,7 @@
         title: `课堂 ${new Date().toLocaleDateString('zh-CN')}`,
         duration: durationText(),
         segments: usable.map((seg) => ({ time: seg.time, text: seg.text })),
+        shots: shots.map((x) => ({ sec: x.sec, name: x.name })),
       }, null, job);
       const res = { ok: true, status: 200 };
       if (!res.ok || data.error) {
@@ -3416,7 +3435,7 @@
     hideBanner();
     beginProgress('正在整理讲稿和笔记…');
     try {
-      const data = await requestNotes({ title, segments: segs, job, shots, source: path }, (d) => {
+      const data = await requestNotes({ title, segments: segs, job, source: path }, (d) => {
         const text = progressText(d);
         const pct = progressPct(d);
         if (pct != null) updateProgress(pct, text);
@@ -3533,8 +3552,11 @@
     }
   }
 
+  let camDragReady = false;
+
   function initCameraDrag() {
-    if (!camPanel) return;
+    if (!camPanel || camDragReady) return;
+    camDragReady = true;
     const handle = camPanel.querySelector('.cp-head');
     if (!handle) return;
     let dragging = false;
@@ -3618,13 +3640,20 @@
     showCamHint('点「打开摄像头」开始');
   }
 
+  let pendingShot = null;   // 正在上传的那一张，保存前要等它完成
+
   async function takeShot() {
     if (camBusy || !camStream || !camVideo) return;
-    const w = camVideo.videoWidth || 1280;
-    const h = camVideo.videoHeight || 720;
-    if (!w || !h) return;
+    if (!camVideo || camVideo.readyState < 2 || !camVideo.videoWidth) {
+      if (camNote) camNote.textContent = '画面还没准备好，等一秒再拍';
+      return;
+    }
+    const w = camVideo.videoWidth;
+    const h = camVideo.videoHeight;
     camBusy = true;
     camShotBtn.disabled = true;
+    const task = { at: Date.now() };
+    pendingShot = task;
     try {
       const maxW = 1600;
       const scale = Math.min(1, maxW / w);
@@ -3648,6 +3677,7 @@
       shots.push({ sec: data.sec != null ? data.sec : sec, name: data.name, at: Date.now() });
       updateCamCount();
       persistSession();
+      if (pendingShot === task) pendingShot = null;
       if (camNote) {
         camNote.textContent = `已存：${data.name}`;
         setTimeout(() => {
@@ -3658,6 +3688,7 @@
     } catch (err) {
       reportClientError('camera', err, 'shot');
       if (camNote) camNote.textContent = '截图失败：' + (err.message || err);
+      if (pendingShot === task) pendingShot = null;
     } finally {
       camBusy = false;
       camShotBtn.disabled = !camStream;
@@ -3958,7 +3989,7 @@
     }
     if (rows.length) {
       box.innerHTML = '<h4>章节速览</h4>'
-        + rows.map((r) => `<a data-t="${r.t}"><b>${r.t}</b>${r.title}</a>`).join('');
+        + rows.map((r) => `<a data-t="${escHtml(r.t)}"><b>${escHtml(r.t)}</b>${escHtml(r.title)}</a>`).join('');
       return;
     }
     // 没有章节速览就退化成「小标题导航」
@@ -3968,7 +3999,7 @@
       if (m2 && !/章节速览|摘要/.test(m2[1])) heads.push(m2[1].trim());
     });
     box.innerHTML = heads.length
-      ? '<h4>小标题</h4>' + heads.map((h, i) => `<a data-head="${i}">${h}</a>`).join('')
+      ? '<h4>小标题</h4>' + heads.map((h, i) => `<a data-head="${i}">${escHtml(h)}</a>`).join('')
       : '<h4>章节速览</h4><div class="nav-empty">这份笔记没有章节速览</div>';
   }
 
@@ -3996,11 +4027,11 @@
     const isTranscript = kind === '转写稿';
 
     pane.innerHTML = '<div class="jp-doc-head">'
-      + `<h2 class="jp-doc-title">${title}</h2>`
+      + `<h2 class="jp-doc-title">${escHtml(title)}</h2>`
       + '<div class="jp-doc-meta">'
       + `<span class="fk ${KIND_CLASS[kind] || ''}">${kind}</span>`
       + `<span>${chars.toLocaleString('zh-CN')} 字</span>`
-      + `<span>${name}</span>`
+      + `<span>${escHtml(name)}</span>`
       + '</div>'
       + '<div class="jp-doc-actions">'
       + (isTranscript ? '<button class="primary" id="jpRegen">重新整理成笔记</button>' : '')

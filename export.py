@@ -51,6 +51,7 @@ figcaption { color:var(--muted); font-size:12px; margin-top:6px; }
 """
 
 IMG_RE = re.compile(r"^\s*!\[\[([^\]|]+?\.(?:jpe?g|png|webp|gif))(?:\|[^\]]*)?\]\]\s*$", re.I)
+MD_IMG_RE = re.compile(r"^\s*!\[[^\]]*\]\(([^)\s]+?\.(?:jpe?g|png|webp|gif))\)\s*$", re.I)
 CAPTION_RE = re.compile(r"^>\s*截图\s*(\d{1,3}:\d{2}(?::\d{2})?)\s*$")
 
 
@@ -131,9 +132,9 @@ def md_to_html(md: str, title: str, images: dict | None = None) -> str:
             close_list()
             continue
 
-        m = IMG_RE.match(line)
+        m = IMG_RE.match(line) or MD_IMG_RE.match(line)
         if m:
-            name = m.group(1).strip()
+            name = Path(m.group(1).strip()).name
             caption = ""
             if i < len(lines):
                 cap = CAPTION_RE.match(lines[i].strip())
@@ -316,9 +317,9 @@ def md_to_docx(md: str, title: str, out: Path, images: dict | None = None) -> No
         i += 1
         if not line:
             continue
-        m = IMG_RE.match(line)
+        m = IMG_RE.match(line) or MD_IMG_RE.match(line)
         if m:
-            body.append(add_image(m.group(1).strip()))
+            body.append(add_image(Path(m.group(1).strip()).name))
             if i < len(lines):
                 cap = CAPTION_RE.match(lines[i].strip())
                 if cap:

@@ -333,6 +333,14 @@ def export_doc(md_path: str, fmt: str) -> tuple[bytes, str, str]:
         raise RuntimeError("找不到文件：" + src.name)
     if src.suffix.lower() != ".md":
         raise RuntimeError("只能导出 markdown")
+    # 只允许导出会话目录或知识库里的文件，别把整块磁盘当读取器
+    roots = [SESSIONS.resolve()]
+    vault = _vault_root()
+    if vault:
+        roots.append(vault.resolve())
+    resolved = src.resolve()
+    if not any(resolved == r or resolved.is_relative_to(r) for r in roots):
+        raise RuntimeError("只能导出会话目录或知识库里的文件")
 
     md = src.read_text(encoding="utf-8")
     title = (re.search(r"^#\s+(.+)$", md, re.M) or [None, src.stem])[1]
@@ -525,11 +533,25 @@ def _unique(path: Path) -> Path:
     return path.with_name(f"{path.stem}-{uuid.uuid4().hex[:6]}{path.suffix}")
 
 
-def _purge_old_notes(target_dir: Path, label: str, title: str) -> list[str]:
+def _purge_old_sessions(label: str, title: str, keep_name: str) -> None:
+    """sessions 里的文件名是「时间戳-标题-label.md」，和知识库的 glob 不一样"""
+    safe = _safe_name(title) or "课堂记录"
+    for f in SESSIONS.glob(f"*-{safe}-{label}.md"):
+        if f.name == keep_name:
+            continue
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
+def _purge_old_notes(target_dir: Path, label: str, title: str, keep: Path | None = None) -> list[str]:
     """同一标题重新生成时，删掉旧的同名文件，只留最新一份"""
     safe = _safe_name(title) or "课堂记录"
     removed = []
     for f in sorted(target_dir.glob(f"{label}-{safe}-*.md")):
+        if keep is not None and f.resolve() == keep.resolve():
+            continue
         try:
             f.unlink()
             removed.append(f.name)
@@ -596,11 +618,17 @@ def save_shot(data: bytes, sec: float, title: str = "", ext: str = "jpg") -> dic
     ext = (ext or "jpg").lower().lstrip(".")
     if ext not in ("jpg", "jpeg", "png", "webp"):
         ext = "jpg"
+    if ext in ("jpg", "jpeg") and not data.startswith(b"\xff\xd8"):
+        raise ValueError("这不像一张 JPEG 图片")
+    if ext == "png" and not data.startswith(b"\x89PNG"):
+        raise ValueError("这不像一张 PNG 图片")
     folder = _shot_dir()
     stamp = time.strftime("%Y-%m-%d-%H%M%S")
     total = max(0, int(sec))
-    name = f"课堂截图-{stamp}-{total // 60:02d}m{total % 60:02d}s.{ext}"
-    path = folder / name
+    # 同一秒可能连拍两张，加个短随机后缀，别互相覆盖
+    suffix = os.urandom(3).hex()
+    name = f"课堂截图-{stamp}-{total // 60:02d}m{total % 60:02d}s-{suffix}.{ext}"
+    path = _unique(folder / name)
     path.write_bytes(data)
 
     vault = _vault_root()
@@ -640,17 +668,23 @@ def insert_shots(markdown: str, shots: list) -> str:
     style = str(cfg.get("shot_link_style") or "wiki").strip().lower()
     prefix = "/" + str(cfg.get("shot_dir") or "attachments").strip("/")
     items = []
+    skipped = []
     for raw in shots:
         if not isinstance(raw, dict):
             continue
         name = str(raw.get("name") or "").strip()
         if not name:
             continue
+        if not shot_file(name):
+            skipped.append(name)      # 文件被删了，别往笔记里塞死链
+            continue
         try:
             sec = float(raw.get("sec") or 0)
         except (TypeError, ValueError):
             sec = 0.0
         items.append((sec, name))
+    if skipped:
+        _log(f"[shots] 跳过 {len(skipped)} 张找不到的截图：{', '.join(skipped[:3])}")
     if not items:
         return markdown
     items.sort()
@@ -663,7 +697,9 @@ def insert_shots(markdown: str, shots: list) -> str:
     heads = []  # (行号, 章节起始秒或 None)
     for idx, line in enumerate(lines):
         if line.startswith("## "):
-            hit = re.search(r"\[(\d{1,3}:\d{2}(?::\d{2})?)\]\s*$", line.strip())
+            # 标题里可能带后缀（[02:00]（重点）），取最后一个时间而不是要求行尾
+            hit = list(re.finditer(r"\[(\d{1,3}:\d{2}(?::\d{2})?)\]", line))[-1:] or [None]
+            hit = hit[0]
             if hit:
                 parts = [int(x) for x in hit.group(1).split(":")]
                 sec = parts[0] * 60 + parts[1] if len(parts) == 2 else parts[0] * 3600 + parts[1] * 60 + parts[2]
@@ -679,15 +715,20 @@ def insert_shots(markdown: str, shots: list) -> str:
 
     # 给每张图找归属章节
     groups = {}
+    early = []
     for sec, name in items:
+        # 章节可能按知识逻辑排序（时间不单调），所以要看全部标题取「≤sec 且时间最大」的那个
         target = None
+        best = None
         for idx, head_sec in heads:
-            if head_sec is not None and head_sec <= sec:
+            if head_sec is None or head_sec > sec:
+                continue
+            if best is None or head_sec > best:
+                best = head_sec
                 target = idx
-            elif head_sec is not None and head_sec > sec:
-                break
         if target is None:
-            target = heads[0][0]
+            early.append((sec, name))      # 比第一个带时间章节还早，统一进文末附录
+            continue
         groups.setdefault(target, []).append((sec, name))
 
     # 从后往前插，避免行号错位
@@ -703,7 +744,11 @@ def insert_shots(markdown: str, shots: list) -> str:
         block_text = "\n" + "\n".join(block(sec, name) for sec, name in sorted(groups[target]))
         lines.insert(insert_at, block_text)
 
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if early:
+        text = text.rstrip() + "\n\n## 课堂截图\n\n" + "\n".join(
+            block(sec, name) for sec, name in sorted(early))
+    return text
 
 
 def shots_sidecar(transcript_path: str | Path) -> Path:
@@ -719,6 +764,8 @@ def save_shots_sidecar(transcript_path: str | Path, shots: list) -> None:
                  for x in shots if isinstance(x, dict) and x.get("name")]
         if clean:
             path.write_text(json.dumps(clean, ensure_ascii=False), encoding="utf-8")
+        elif path.exists():
+            path.unlink()          # 这一节没有截图了，别让旧清单在下次重新整理时复活
     except (OSError, TypeError, ValueError):
         pass
 
@@ -769,18 +816,37 @@ def write_note_file(
         try:
             if not target_dir.is_dir():
                 raise FileNotFoundError(f"目录不存在：{target_dir}")
-            _purge_old_notes(target_dir, label, title)
             path = target_dir / f"{stem}.md"
-            path.write_text(body, encoding="utf-8")
+            tmp = path.with_suffix(".md.part")
+            try:
+                tmp.write_text(body, encoding="utf-8")
+                os.replace(tmp, path)          # 先落盘成功，再清旧文件，避免写失败把旧笔记删了
+            finally:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+            _purge_old_notes(target_dir, label, title, keep=path)
             _archive_old_notes(cfg, label, title, path)
             return path, "obsidian"
         except OSError as exc:
             print(f"[warn] 写入 Obsidian 收件箱失败（{exc}），改存 sessions/", file=sys.stderr)
 
     SESSIONS.mkdir(parents=True, exist_ok=True)
-    _purge_old_notes(SESSIONS, label, title)
-    path = SESSIONS / f"{time.strftime('%Y%m%d-%H%M%S')}-{_safe_name(title)[:40] or '课堂记录'}-{label}.md"
-    path.write_text(body, encoding="utf-8")
+    name = f"{time.strftime('%Y%m%d-%H%M%S')}-{_safe_name(title)[:40] or '课堂记录'}-{label}.md"
+    path = SESSIONS / name
+    tmp = path.with_suffix(".md.part")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    _purge_old_sessions(label, title, keep_name=name)
     return path, "sessions"
 
 
@@ -957,14 +1023,18 @@ def _log_client(payload: dict) -> None:
         LOGS.mkdir(parents=True, exist_ok=True)
         if CLIENT_LOG.exists() and CLIENT_LOG.stat().st_size > 2 * 1024 * 1024:
             CLIENT_LOG.replace(CLIENT_LOG.with_suffix(".log.1"))
+        def clean(value, limit=120):
+            text = re.sub(r"[\x00-\x1f\x7f]", " ", str(value or ""))
+            return text[:limit]
+
         items = [
             time.strftime("%Y-%m-%d %H:%M:%S"),
-            str(payload.get("kind") or "error"),
-            "view=" + str(payload.get("view") or "-"),
-            "running=" + str(payload.get("running")),
-            "segments=" + str(payload.get("segments")),
-            "serverDown=" + str(payload.get("serverDown")),
-            "msg=" + str(payload.get("message") or "")[:300].replace("\n", " "),
+            clean(payload.get("kind") or "error", 20),
+            "view=" + clean(payload.get("view") or "-", 20),
+            "running=" + clean(payload.get("running"), 8),
+            "segments=" + clean(payload.get("segments"), 8),
+            "serverDown=" + clean(payload.get("serverDown"), 8),
+            "msg=" + clean(payload.get("message"), 300),
         ]
         ctx = payload.get("ctx")
         if ctx:
@@ -1245,6 +1315,13 @@ def _generate_notes(payload: dict) -> dict:
             if not notes:
                 article, notes = "", article
 
+        # 先把截图插好，再落盘——避免原文写两遍（第二遍会把刚写的文件归档一次）
+        shots = payload.get("shots") or []
+        if shots:
+            notes = insert_shots(notes, shots)
+            if article.strip():
+                article = insert_shots(article, shots)
+
         _progress(job, stage="save", done=0, total=1, text="写入知识库")
         article_path, where = "", ""
         if article.strip():
@@ -1253,15 +1330,6 @@ def _generate_notes(payload: dict) -> dict:
                 label="课堂原文", kind="原文", tags=("待分类", "课堂原文", "讲稿"),
             )
             article_path, where = str(p), where_one
-
-        shots = payload.get("shots") or []
-        if shots:
-            notes = insert_shots(notes, shots)
-            if article.strip():
-                article = insert_shots(article, shots)
-                # 重新写一遍原文，把截图带进去（同名覆盖）
-                write_note_file(title, article, cfg, label="课堂原文", kind="原文",
-                                tags=("待分类", "课堂原文", "讲稿"))
 
         banner = f"> 对应原文：[[{Path(article_path).stem}]]\n\n" if article_path else ""
         p_notes, where_two = write_note_file(title, notes, cfg, banner=banner)
@@ -1621,7 +1689,7 @@ def read_doc(path_str: str) -> str:
         roots.append(v.resolve())
 
     # 路径必须落在允许范围内
-    if not any(str(p).startswith(str(r)) for r in roots):
+    if not any(p == r or p.is_relative_to(r) for r in roots):
         raise RuntimeError("只能读取会话目录或知识库里的文件")
 
     if p.suffix.lower() == ".md" and p.is_file():
@@ -1637,7 +1705,7 @@ def read_doc(path_str: str) -> str:
         if not root.is_dir():
             continue
         try:
-            found.extend(x for x in root.rglob(name) if x.is_file())
+            found.extend(x for x in root.rglob(name) if x.is_file() and x.suffix.lower() == ".md")
         except OSError:
             continue
     if not found:
@@ -1815,11 +1883,43 @@ def _inject_version(html: str) -> str:
     # 顺手把配置塞进页面：少一次网络请求，也避免 /api/config 失败把整页卡死
     try:
         blob = json.dumps(public_config(load_config()), ensure_ascii=False)
+        # 别让配置里的 </script> 把内联脚本截断（prompt / 路径都是用户可控的）
+        blob = blob.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
         boot = f'<script>window.__BOOT_CONFIG = {blob};</script>'
         html = html.replace("</head>", boot + "</head>", 1)
     except Exception as exc:      # 配置坏了也别把页面拖死
         print(f"[warn] 注入配置失败：{exc}")
     return html
+
+
+ALLOW_REMOTE = False   # 只有显式 --host 指定其它地址时才放开
+
+
+def _origin_allowed(origin: str) -> bool:
+    """只放行本机页面的跨站请求；没有 Origin（curl、脚本）也放行"""
+    if not origin:
+        return True
+    try:
+        host = urllib.parse.urlparse(origin).hostname or ""
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def _is_loopback(addr: str) -> bool:
+    if not addr:
+        return False
+    if addr in ("::1", "localhost"):
+        return True
+    if addr.startswith("::ffff:"):
+        addr = addr[7:]
+    return addr.startswith("127.")
+
+
+STATIC_ALLOW = {
+    "", "/", "/index.html", "/app.js", "/style.css", "/app.ico",
+    "/favicon.ico", "/manifest.json", "/robots.txt",
+}
 
 
 class DualStackServer(ThreadingHTTPServer):
@@ -1833,6 +1933,13 @@ class DualStackServer(ThreadingHTTPServer):
         except OSError:
             pass
         super().server_bind()
+
+    def verify_request(self, request, client_address):
+        # 双栈监听必然绑到 0.0.0.0，这里把非本机的连接挡掉：
+        # 同一 Wi-Fi 下的设备不该能读笔记、不该能花你的 API 额度
+        if ALLOW_REMOTE:
+            return True
+        return _is_loopback(client_address[0])
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -1861,7 +1968,11 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, must-revalidate")
 
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # 只对同源页面回显，别再全站 *（否则任意网页能读走整库笔记）
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and _origin_allowed(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
@@ -1943,11 +2054,15 @@ class Handler(SimpleHTTPRequestHandler):
             path = shot_file(name)
             if not path:
                 return self._json(404, {"error": "找不到这张截图"})
-            data = path.read_bytes()
+            try:
+                data = path.read_bytes()
+            except OSError:
+                return self._json(404, {"error": "这张截图读不出来了"})
             ctype = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
                      "png": "image/png", "webp": "image/webp"}.get(path.suffix.lstrip("."), "application/octet-stream")
             self.send_response(200)
             self.send_header("Content-Type", ctype)
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self._cors()
@@ -1998,14 +2113,28 @@ class Handler(SimpleHTTPRequestHandler):
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             sid = (q.get("session") or [""])[0]
             return self._json(200, {"seqs": list_segments(sid)})
-        return super().do_GET()
+        # 只放行前端资源和模型文件；config.json、sessions、logs 一律不给
+        if route in STATIC_ALLOW or route.startswith(("/emotion-ball/", "/models/", "/vendor/")):
+            return super().do_GET()
+        return self._json(404, {"error": "没有这个资源"})
 
     def do_POST(self):
         self._log_line(f"POST {self.path}  from {self.client_address[0]}")
+        # 别让随便一个网页就能往本机接口写东西（改配置、花额度、灌截图）
+        origin = (self.headers.get("Origin") or "").strip()
+        if not _origin_allowed(origin):
+            return self._json(403, {"error": "跨站请求被拒绝"})
         _touch()
         route = self.path.split("?")[0]
         try:
             length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return self._json(400, {"error": "请求长度不合法"})
+        # 别让一个 Content-Length 就把内存打爆
+        limit = 32 * 1024 * 1024 if route == "/api/shot" else 4 * 1024 * 1024
+        if length > limit:
+            return self._json(413, {"error": f"请求太大（上限 {limit // 1048576}MB）"})
+        try:
             body = self.rfile.read(length) if length else b""
         except Exception:
             return self._json(400, {"error": "读取请求体失败"})
@@ -2134,7 +2263,7 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 payload = json.loads(body or b"{}")
                 path = save_session(payload)
-                if payload.get("shots"):
+                if "shots" in payload:
                     save_shots_sidecar(path, payload.get("shots") or [])
                 return self._json(200, {"path": path})
             except Exception as exc:
@@ -2184,6 +2313,9 @@ def main():
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args()
+
+    global ALLOW_REMOTE
+    ALLOW_REMOTE = args.host not in ("127.0.0.1", "localhost", "::1")
 
     cfg = load_config()
     if not CONFIG_PATH.exists():
