@@ -188,29 +188,39 @@ def main():
     else:
         print('没有新改动，直接检查推送')
 
-    ip, direct = pick_ip()
-    if not ip:
-        print('候选 IP 全都不通，先检查网络')
-        return 1
-
-    if direct:
-        print(f'github.com 解析可用（{ip}），直接推送')
+    # 先试直连（DNS 给的地址能用就最省事）
+    try:
+        dns_ok = tcp_ok(socket.gethostbyname('github.com'))
+    except OSError:
+        dns_ok = False
+    if dns_ok:
+        print('直连推送…')
         if git('push', 'origin', 'main') == 0:
             print('已推送')
             return 0
         print('直连失败，改走中转')
 
-    print(f'用 {ip} 起本地中转…')
-    port, srv = start_relay(ip)
-    env = {'HTTPS_PROXY': f'http://127.0.0.1:{port}',
-           'HTTP_PROXY': f'http://127.0.0.1:{port}',
-           'GIT_TERMINAL_PROMPT': '0'}
-    try:
-        code = git('push', 'origin', 'main', env=env)
-        print('已推送' if code == 0 else '推送失败（见上方 git 输出）')
-        return code
-    finally:
-        srv.close()
+    # 逐个候选 IP 试，TLS 被掐就换下一个
+    tried = []
+    for ip in CANDIDATES:
+        if not tcp_ok(ip):
+            continue
+        tried.append(ip)
+        print(f'用 {ip} 起本地中转…')
+        port, srv = start_relay(ip)
+        env = {'HTTPS_PROXY': f'http://127.0.0.1:{port}',
+               'HTTP_PROXY': f'http://127.0.0.1:{port}',
+               'GIT_TERMINAL_PROMPT': '0'}
+        try:
+            if git('push', 'origin', 'main', env=env) == 0:
+                print('已推送')
+                return 0
+        finally:
+            srv.close()
+        print(f'{ip} 不行，换下一个')
+
+    print('所有候选都失败，试过的 IP：' + (', '.join(tried) or '无'))
+    return 1
 
 
 if __name__ == '__main__':
