@@ -338,20 +338,38 @@ def export_doc(md_path: str, fmt: str) -> tuple[bytes, str, str]:
     title = (re.search(r"^#\s+(.+)$", md, re.M) or [None, src.stem])[1]
     title = re.sub(r'[\\/:*?"<>|]', "-", title.strip()) or src.stem
 
+    def _images() -> dict:
+        """把 markdown 里引用到的截图读出来，交给导出模块内嵌"""
+        found = {}
+        for name in ex.shot_names(md):
+            path = shot_file(name)
+            if not path:
+                continue
+            ext = path.suffix.lstrip(".").lower()
+            mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                    "png": "image/png", "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+            try:
+                found[name] = (path.read_bytes(), mime)
+            except OSError:
+                continue
+        return found
+
+    images = _images()
+
     if fmt == "html":
-        html = ex.md_to_html(md, title)
+        html = ex.md_to_html(md, title, images)
         return html.encode("utf-8"), f"{title}.html", "text/html; charset=utf-8"
 
     if fmt == "pdf":
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out.pdf"
-            ex.html_to_pdf(ex.md_to_html(md, title), out)
+            ex.html_to_pdf(ex.md_to_html(md, title, images), out)
             return out.read_bytes(), f"{title}.pdf", "application/pdf"
 
     if fmt == "docx":
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out.docx"
-            ex.md_to_docx(md, title, out)
+            ex.md_to_docx(md, title, out, images)
             return out.read_bytes(), f"{title}.docx", (
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
@@ -686,6 +704,34 @@ def insert_shots(markdown: str, shots: list) -> str:
         lines.insert(insert_at, block_text)
 
     return "\n".join(lines)
+
+
+def shots_sidecar(transcript_path: str | Path) -> Path:
+    path = Path(transcript_path)
+    return path.with_suffix(".shots.json")
+
+
+def save_shots_sidecar(transcript_path: str | Path, shots: list) -> None:
+    """把这一节的截图清单存成旁挂文件，重新整理时还能把图插回去"""
+    try:
+        path = shots_sidecar(transcript_path)
+        clean = [{"sec": float(x.get("sec") or 0), "name": str(x.get("name") or "")}
+                 for x in shots if isinstance(x, dict) and x.get("name")]
+        if clean:
+            path.write_text(json.dumps(clean, ensure_ascii=False), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def load_shots_sidecar(transcript_path: str | Path) -> list:
+    try:
+        path = shots_sidecar(transcript_path)
+        if not path.is_file():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
 
 
 def write_note_file(
@@ -2070,6 +2116,8 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/notes":
             try:
                 payload = json.loads(body or b"{}")
+                if not payload.get("shots") and payload.get("source"):
+                    payload["shots"] = load_shots_sidecar(payload["source"])
                 if payload.get("background"):
                     try:
                         accepted = submit_notes(payload)
@@ -2084,7 +2132,10 @@ class Handler(SimpleHTTPRequestHandler):
 
         if route == "/api/save":
             try:
-                path = save_session(json.loads(body or b"{}"))
+                payload = json.loads(body or b"{}")
+                path = save_session(payload)
+                if payload.get("shots"):
+                    save_shots_sidecar(path, payload.get("shots") or [])
                 return self._json(200, {"path": path})
             except Exception as exc:
                 return self._json(500, {"error": f"保存失败：{exc}"})

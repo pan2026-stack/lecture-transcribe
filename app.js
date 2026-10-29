@@ -3416,7 +3416,7 @@
     hideBanner();
     beginProgress('正在整理讲稿和笔记…');
     try {
-      const data = await requestNotes({ title, segments: segs, job, shots }, (d) => {
+      const data = await requestNotes({ title, segments: segs, job, shots, source: path }, (d) => {
         const text = progressText(d);
         const pct = progressPct(d);
         if (pct != null) updateProgress(pct, text);
