@@ -3498,6 +3498,82 @@
     if (camNote) camNote.textContent = '截图会存进知识库附件，生成笔记时按时间插到对应章节';
   }
 
+  // 面板可拖动：拖标题栏，位置记在本地
+  const CAM_POS_KEY = 'lecture-transcribe:cameraPos';
+
+  function clampCamPos(left, top) {
+    const pad = 8;
+    const w = camPanel ? camPanel.offsetWidth : 320;
+    const h = camPanel ? camPanel.offsetHeight : 240;
+    const maxLeft = Math.max(pad, window.innerWidth - w - pad);
+    const maxTop = Math.max(pad, window.innerHeight - h - pad);
+    return {
+      left: Math.min(Math.max(pad, left), maxLeft),
+      top: Math.min(Math.max(pad, top), maxTop),
+    };
+  }
+
+  function applyCamPos(left, top, remember) {
+    if (!camPanel) return;
+    const pos = clampCamPos(left, top);
+    camPanel.style.left = pos.left + 'px';
+    camPanel.style.top = pos.top + 'px';
+    camPanel.style.right = 'auto';
+    camPanel.style.bottom = 'auto';
+    if (remember) {
+      try { localStorage.setItem(CAM_POS_KEY, JSON.stringify(pos)); } catch (_) {}
+    }
+  }
+
+  function restoreCamPos() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(CAM_POS_KEY) || 'null'); } catch (_) {}
+    if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
+      applyCamPos(saved.left, saved.top, false);
+    }
+  }
+
+  function initCameraDrag() {
+    if (!camPanel) return;
+    const handle = camPanel.querySelector('.cp-head');
+    if (!handle) return;
+    let dragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
+      const rect = camPanel.getBoundingClientRect();
+      dragging = true;
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+      applyCamPos(rect.left, rect.top, false);
+      try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+      e.preventDefault();
+    });
+
+    window.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      applyCamPos(e.clientX - offsetX, e.clientY - offsetY, false);
+    });
+
+    const endDrag = () => {
+      if (!dragging) return;
+      dragging = false;
+      const rect = camPanel.getBoundingClientRect();
+      applyCamPos(rect.left, rect.top, true);
+    };
+    window.addEventListener('pointerup', endDrag);
+    window.addEventListener('pointercancel', endDrag);
+
+    window.addEventListener('resize', () => {
+      const rect = camPanel.getBoundingClientRect();
+      if (camPanel.style.left) applyCamPos(rect.left, rect.top, false);
+    });
+
+    restoreCamPos();
+  }
+
   async function openCamera() {
     if (camStream) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -3592,8 +3668,12 @@
     $('btnCamera').addEventListener('click', () => {
       if (!camPanel) return;
       const hiding = camPanel.classList.toggle('hidden');
-      if (hiding) closeCamera();
-      else openCamera();
+      if (hiding) {
+        closeCamera();
+      } else {
+        initCameraDrag();     // 首次打开时应用记住的位置
+        openCamera();
+      }
     });
   }
   if (camCloseBtn) {

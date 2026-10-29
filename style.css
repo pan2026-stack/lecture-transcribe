@@ -2628,6 +2628,9 @@ body.hourslow .hour-chip-fly { transition-duration: 1.84s, 1.84s, .9s; }
   backdrop-filter: blur(12px);
 }
 .camera-panel .cp-head {
+  cursor: move;
+  touch-action: none;
+  user-select: none;
   display: flex;
   align-items: center;
   gap: 8px;
