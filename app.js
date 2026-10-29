@@ -214,6 +214,7 @@
       localStorage.setItem(STORE_KEY, JSON.stringify({
         at: Date.now(),
         segments: segments.map((x) => ({ seq: x.seq, time: x.time, text: x.text, tr: x.tr || '' })),
+        shots: shots.map((x) => ({ sec: x.sec, name: x.name })),
       }));
     } catch (_) { /* 隐私模式等情况忽略 */ }
   }
@@ -227,6 +228,10 @@
       data = JSON.parse(raw);
     } catch (_) { return 0; }
     const list = (data && data.segments) || [];
+    if (Array.isArray(data && data.shots)) {
+      shots = data.shots.filter((x) => x && x.name).map((x) => ({ sec: Number(x.sec) || 0, name: x.name }));
+      updateCamCount();
+    }
     if (!list.length) return 0;
 
     elTranscript.innerHTML = '';
@@ -1890,7 +1895,8 @@
     setMainState('busy');
     // 看门狗：万一收尾里某一步卡住，15 秒后把按钮放回来，不至于永远卡着
     const watchdog = setTimeout(() => {
-      if (mainState === 'busy') setMainState('recording');
+      resetShots();                       // 新的一节课，截图从头计数
+    if (mainState === 'busy') setMainState('recording');
     }, 15000);
     hideBanner();
     elSegInfo.textContent = '正在收尾…';
@@ -2039,7 +2045,7 @@
     let out = null;
     try {
       out = await requestNotes({
-        title: meta.title, duration: meta.duration, segments: snapshot,
+        title: meta.title, duration: meta.duration, segments: snapshot, shots,
       }, (d) => {
         const text = progressText(d);
         const pct = progressPct(d);
@@ -2170,6 +2176,11 @@
       .replace(/\[([^\]]{1,40})\]\((https?:\/\/[^\s)]+)\)/g,
         '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
       // [03:12] 这样的时间锚点：点一下跳到对应转写行
+      // 课堂截图：Obsidian 的 ![[文件名]] 和标准 ![](路径) 都认
+      .replace(/!\[\[([^\]|]+?\.(?:jpe?g|png|webp|gif))(?:\|[^\]]*)?\]\]/gi,
+        (m, name) => `<img class="note-img" loading="lazy" alt="课堂截图" src="/api/shot?name=${encodeURIComponent(name)}">`)
+      .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g,
+        (m, alt, src) => `<img class="note-img" loading="lazy" alt="${alt || '课堂截图'}" src="${src}">`)
       .replace(/\[(\d{1,3}:\d{2}(?::\d{2})?)\]/g, '<a class="ts-jump" data-t="$1">$1</a>')
       // （理论）（现状）（方法）（案例）（对比） -> 彩色胶囊
       .replace(/（(理论|现状|方法|案例|对比|原则|风险)）/g, (m, k) =>
@@ -3405,7 +3416,7 @@
     hideBanner();
     beginProgress('正在整理讲稿和笔记…');
     try {
-      const data = await requestNotes({ title, segments: segs, job }, (d) => {
+      const data = await requestNotes({ title, segments: segs, job, shots }, (d) => {
         const text = progressText(d);
         const pct = progressPct(d);
         if (pct != null) updateProgress(pct, text);
@@ -3450,6 +3461,149 @@
     const path = currentDocPath || regenSource;
     await startRegen(path, $('btnRegenNotes'));
   }
+
+  // ---------------------------------------------------------------- 拍板书
+  const camPanel = $('cameraPanel');
+  const camVideo = $('camVideo');
+  const camHint = $('camHint');
+  const camShotBtn = $('camShot');
+  const camOpenBtn = $('camOpen');
+  const camCloseBtn = $('camClose');
+  const camCountEl = $('camCount');
+  const camNote = $('camNote');
+
+  let camStream = null;
+  let camBusy = false;
+  let shots = [];              // [{sec, name, at}]
+
+  function shotSeconds() {
+    // 录音中就用时长，没录音就是 0（生成时插到最前面那一章）
+    return running ? Math.max(0, Math.round(recordedSec)) : 0;
+  }
+
+  function updateCamCount() {
+    if (camCountEl) camCountEl.textContent = `${shots.length} 张`;
+  }
+
+  function showCamHint(text) {
+    if (camHint) {
+      camHint.textContent = text;
+      camHint.style.display = text ? 'flex' : 'none';
+    }
+  }
+
+  function resetShots() {
+    shots = [];
+    updateCamCount();
+    if (camNote) camNote.textContent = '截图会存进知识库附件，生成笔记时按时间插到对应章节';
+  }
+
+  async function openCamera() {
+    if (camStream) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showCamHint('这个浏览器拿不到摄像头');
+      return;
+    }
+    try {
+      camStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      if (camVideo) {
+        camVideo.srcObject = camStream;
+        camVideo.dataset.live = '1';
+        await camVideo.play().catch(() => {});
+      }
+      if (camShotBtn) camShotBtn.disabled = false;
+      if (camOpenBtn) camOpenBtn.textContent = '重连摄像头';
+      showCamHint('');
+    } catch (err) {
+      const name = (err && err.name) || '';
+      if (name === 'NotAllowedError') showCamHint('摄像头权限被拒绝，点地址栏左边的图标允许一下');
+      else if (name === 'NotReadableError' || name === 'TrackStartError') {
+        showCamHint('摄像头被别的程序占用了（会议软件？），关掉那边再试');
+      } else if (name === 'NotFoundError') showCamHint('没找到摄像头，检查 USB 有没有插好');
+      else showCamHint('打不开摄像头：' + (err.message || name));
+      reportClientError('camera', err, 'open');
+    }
+  }
+
+  function closeCamera() {
+    if (camStream) {
+      camStream.getTracks().forEach((t) => t.stop());
+      camStream = null;
+    }
+    if (camVideo) {
+      camVideo.srcObject = null;
+      delete camVideo.dataset.live;
+    }
+    if (camShotBtn) camShotBtn.disabled = true;
+    if (camOpenBtn) camOpenBtn.textContent = '打开摄像头';
+    showCamHint('点「打开摄像头」开始');
+  }
+
+  async function takeShot() {
+    if (camBusy || !camStream || !camVideo) return;
+    const w = camVideo.videoWidth || 1280;
+    const h = camVideo.videoHeight || 720;
+    if (!w || !h) return;
+    camBusy = true;
+    camShotBtn.disabled = true;
+    try {
+      const maxW = 1600;
+      const scale = Math.min(1, maxW / w);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+      canvas.getContext('2d').drawImage(camVideo, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.82));
+      if (!blob) throw new Error('画面还没准备好');
+      const sec = shotSeconds();
+      const url = '/api/shot?' + new URLSearchParams({
+        sec: String(sec), title: sessionTitle || defaultTitle(), ext: 'jpg',
+      }).toString();
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/jpeg' },
+        body: blob,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      shots.push({ sec: data.sec != null ? data.sec : sec, name: data.name, at: Date.now() });
+      updateCamCount();
+      persistSession();
+      if (camNote) {
+        camNote.textContent = `已存：${data.name}`;
+        setTimeout(() => {
+          if (camNote) camNote.textContent = '截图会存进知识库附件，生成笔记时按时间插到对应章节';
+        }, 2600);
+      }
+      flashEmotion('13', null, 1200);
+    } catch (err) {
+      reportClientError('camera', err, 'shot');
+      if (camNote) camNote.textContent = '截图失败：' + (err.message || err);
+    } finally {
+      camBusy = false;
+      camShotBtn.disabled = !camStream;
+    }
+  }
+
+  if ($('btnCamera')) {
+    $('btnCamera').addEventListener('click', () => {
+      if (!camPanel) return;
+      const hiding = camPanel.classList.toggle('hidden');
+      if (hiding) closeCamera();
+      else openCamera();
+    });
+  }
+  if (camCloseBtn) {
+    camCloseBtn.addEventListener('click', () => {
+      if (camPanel) camPanel.classList.add('hidden');
+      closeCamera();
+    });
+  }
+  if (camOpenBtn) camOpenBtn.addEventListener('click', openCamera);
+  if (camShotBtn) camShotBtn.addEventListener('click', takeShot);
 
   // ---------------------------------------------------------------- 错误上报
   // 浏览器里的异常直接写到服务端 logs/client.log，事后不用再靠截图

@@ -89,6 +89,10 @@ DEFAULT_CONFIG = {
     # 无论旧配置 watchdog_strict 如何，近期有请求或有整理任务时均不退出。
     "watchdog_restart": False,
     "watchdog_strict": False,
+    # 课堂截图存哪：相对知识库根目录的文件夹名（留空则存 sessions/shots/）
+    "shot_dir": "attachments",
+    # 截图在笔记里怎么引用：wiki 用 ![[文件名]]，md 用 ![](attachments/文件名)
+    "shot_link_style": "wiki",
     # 延伸阅读最多给几条；4 是「一屏扫完」的经验值，可改
     "reading_list_max": 4,
 }
@@ -550,6 +554,138 @@ def _archive_old_notes(cfg: dict, label: str, title: str, keep: Path) -> list[st
     if moved:
         print(f"[notes] 归档同名旧文件 {len(moved)} 个 -> 99-归档/{time.strftime('%Y-%m')}")
     return moved
+
+
+def _shot_dir() -> Path:
+    """截图目录：优先放知识库，没有知识库就放 sessions/shots"""
+    cfg = load_config()
+    name = (cfg.get("shot_dir") or "").strip()
+    vault = _vault_root()
+    if vault and name:
+        target = vault / name
+    else:
+        target = SESSIONS / "shots"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def save_shot(data: bytes, sec: float, title: str = "", ext: str = "jpg") -> dict:
+    """把浏览器传来的一帧存成图片，文件名带时间戳"""
+    if not data:
+        raise ValueError("截图内容为空")
+    if len(data) > 12 * 1024 * 1024:
+        raise ValueError("截图太大（超过 12MB）")
+    ext = (ext or "jpg").lower().lstrip(".")
+    if ext not in ("jpg", "jpeg", "png", "webp"):
+        ext = "jpg"
+    folder = _shot_dir()
+    stamp = time.strftime("%Y-%m-%d-%H%M%S")
+    total = max(0, int(sec))
+    name = f"课堂截图-{stamp}-{total // 60:02d}m{total % 60:02d}s.{ext}"
+    path = folder / name
+    path.write_bytes(data)
+
+    vault = _vault_root()
+    rel = ""
+    if vault:
+        try:
+            rel = str(path.relative_to(vault)).replace("\\", "/")
+        except ValueError:
+            rel = path.name
+    return {"name": name, "path": str(path), "rel": rel, "sec": round(float(sec), 1)}
+
+
+def shot_file(name: str) -> Path | None:
+    """按文件名取截图，禁止目录穿越"""
+    safe = os.path.basename(name or "")
+    if not safe or safe != name:
+        return None
+    for folder in (_shot_dir(), SESSIONS / "shots"):
+        candidate = folder / safe
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _mmss(sec: float) -> str:
+    total = max(0, int(sec))
+    if total >= 3600:
+        return f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}"
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def insert_shots(markdown: str, shots: list) -> str:
+    """把截图按时间插到对应章节末尾；没有章节就用文末附录"""
+    if not shots:
+        return markdown
+    cfg = load_config()
+    style = str(cfg.get("shot_link_style") or "wiki").strip().lower()
+    prefix = "/" + str(cfg.get("shot_dir") or "attachments").strip("/")
+    items = []
+    for raw in shots:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            sec = float(raw.get("sec") or 0)
+        except (TypeError, ValueError):
+            sec = 0.0
+        items.append((sec, name))
+    if not items:
+        return markdown
+    items.sort()
+
+    def block(sec: float, name: str) -> str:
+        link = f"![[{name}]]" if style == "wiki" else f"![]({prefix}/{name})"
+        return f"{link}\n> 截图 {_mmss(sec)}\n"
+
+    lines = markdown.split("\n")
+    heads = []  # (行号, 章节起始秒或 None)
+    for idx, line in enumerate(lines):
+        if line.startswith("## "):
+            hit = re.search(r"\[(\d{1,3}:\d{2}(?::\d{2})?)\]\s*$", line.strip())
+            if hit:
+                parts = [int(x) for x in hit.group(1).split(":")]
+                sec = parts[0] * 60 + parts[1] if len(parts) == 2 else parts[0] * 3600 + parts[1] * 60 + parts[2]
+                heads.append((idx, sec))
+            else:
+                heads.append((idx, None))
+
+    # 没有带时间的章节：整段挂到文末
+    if not any(sec is not None for _, sec in heads):
+        tail = "\n\n## 课堂截图\n\n"
+        tail += "\n".join(block(sec, name) for sec, name in items)
+        return markdown.rstrip() + "\n" + tail
+
+    # 给每张图找归属章节
+    groups = {}
+    for sec, name in items:
+        target = None
+        for idx, head_sec in heads:
+            if head_sec is not None and head_sec <= sec:
+                target = idx
+            elif head_sec is not None and head_sec > sec:
+                break
+        if target is None:
+            target = heads[0][0]
+        groups.setdefault(target, []).append((sec, name))
+
+    # 从后往前插，避免行号错位
+    for target in sorted(groups, reverse=True):
+        end = len(lines)
+        for idx in range(target + 1, len(lines)):
+            if lines[idx].startswith("## "):
+                end = idx
+                break
+        insert_at = end
+        while insert_at > target + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        block_text = "\n" + "\n".join(block(sec, name) for sec, name in sorted(groups[target]))
+        lines.insert(insert_at, block_text)
+
+    return "\n".join(lines)
 
 
 def write_note_file(
@@ -1071,6 +1207,15 @@ def _generate_notes(payload: dict) -> dict:
                 label="课堂原文", kind="原文", tags=("待分类", "课堂原文", "讲稿"),
             )
             article_path, where = str(p), where_one
+
+        shots = payload.get("shots") or []
+        if shots:
+            notes = insert_shots(notes, shots)
+            if article.strip():
+                article = insert_shots(article, shots)
+                # 重新写一遍原文，把截图带进去（同名覆盖）
+                write_note_file(title, article, cfg, label="课堂原文", kind="原文",
+                                tags=("待分类", "课堂原文", "讲稿"))
 
         banner = f"> 对应原文：[[{Path(article_path).stem}]]\n\n" if article_path else ""
         p_notes, where_two = write_note_file(title, notes, cfg, banner=banner)
@@ -1746,6 +1891,24 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(400, {"error": str(exc)})
         if route == "/api/history":
             return self._json(200, {"items": list_history()})
+        if route == "/api/shot":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            name = (qs.get("name") or [""])[0]
+            path = shot_file(name)
+            if not path:
+                return self._json(404, {"error": "找不到这张截图"})
+            data = path.read_bytes()
+            ctype = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                     "png": "image/png", "webp": "image/webp"}.get(path.suffix.lstrip("."), "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self._cors()
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if route == "/api/doc":
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             try:
@@ -1800,6 +1963,20 @@ class Handler(SimpleHTTPRequestHandler):
             body = self.rfile.read(length) if length else b""
         except Exception:
             return self._json(400, {"error": "读取请求体失败"})
+
+        if route == "/api/shot":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            try:
+                sec = float((qs.get("sec") or ["0"])[0])
+            except ValueError:
+                sec = 0.0
+            title = (qs.get("title") or [""])[0]
+            ext = (qs.get("ext") or ["jpg"])[0]
+            try:
+                info = save_shot(body, sec, title, ext)
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(200, info)
 
         if route == "/api/client-log":
             try:

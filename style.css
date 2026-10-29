@@ -2611,3 +2611,79 @@ body.hourslow .hour-chip-fly { transition-duration: 1.84s, 1.84s, .9s; }
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: .45; transform: scale(.85); }
 }
+
+
+/* ---------------- 拍板书面板 ---------------- */
+.camera-panel {
+  position: fixed;
+  right: 22px;
+  bottom: 26px;
+  z-index: 80;
+  width: 320px;
+  padding: 10px;
+  border-radius: 16px;
+  background: rgba(252, 253, 255, .96);
+  border: 1px solid rgba(158, 172, 193, .3);
+  box-shadow: 0 16px 36px rgba(20, 34, 52, .18), inset 0 1px 0 #fff;
+  backdrop-filter: blur(12px);
+}
+.camera-panel .cp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.camera-panel .cp-title { font-size: 12.5px; color: #3d4b5c; font-weight: 600; }
+.camera-panel .cp-count { font-size: 11px; color: #8a95a5; margin-left: auto; font-variant-numeric: tabular-nums; }
+.camera-panel .cp-close {
+  border: 0; background: transparent; cursor: pointer;
+  width: 22px; height: 22px; border-radius: 7px;
+  font-size: 15px; line-height: 1; color: #7d8896;
+}
+.camera-panel .cp-close:hover { background: rgba(158, 172, 193, .18); }
+.camera-panel .cp-stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 11px;
+  overflow: hidden;
+  background: #dfe5ee;
+}
+.camera-panel video {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.camera-panel .cp-hint {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11.5px; color: #7d8896; text-align: center; padding: 0 14px;
+}
+.camera-panel video[data-live="1"] + .cp-hint { display: none; }
+.camera-panel .cp-actions { display: flex; gap: 8px; margin-top: 9px; }
+.camera-panel .cp-btn {
+  flex: 1; height: 32px; border: 0; border-radius: 9px;
+  font-size: 12.5px; cursor: pointer;
+}
+.camera-panel .cp-btn.primary {
+  color: #fff;
+  background: linear-gradient(145deg, #3a8dbd, #22719e);
+  box-shadow: 2px 2px 6px rgba(34, 113, 158, .3), -1px -1px 4px #fff;
+}
+.camera-panel .cp-btn.primary:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+.camera-panel .cp-btn.ghost {
+  color: #46536a; background: rgba(158, 172, 193, .16);
+}
+.camera-panel .cp-note { margin: 8px 2px 0; font-size: 10.5px; color: #97a1ae; line-height: 1.5; }
+.camera-panel .cp-thumbs { display: flex; gap: 6px; margin-top: 8px; overflow-x: auto; }
+.camera-panel .cp-thumbs img {
+  width: 54px; height: 30px; object-fit: cover; border-radius: 5px;
+  border: 1px solid rgba(158, 172, 193, .4);
+}
+
+/* 笔记里的截图 */
+.note-img {
+  display: block;
+  max-width: 100%;
+  margin: 10px 0 6px;
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(20, 34, 52, .16);
+  cursor: zoom-in;
+}

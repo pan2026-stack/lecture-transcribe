@@ -34,12 +34,30 @@
       <span class="ic">⟳</span>处理<span class="tab-badge hidden" id="jobBadge">0</span>
     </button>
     <div class="spacer"></div>
+    <button class="tab" id="btnCamera"><span class="ic">◎</span>拍板书</button>
     <button class="tab" id="btnSettings"><span class="ic">⚙</span>设置</button>
   </nav>
 
   <div class="body">
 
     <div class="banner hidden" id="banner"></div>
+
+  <div class="camera-panel hidden" id="cameraPanel">
+    <div class="cp-head">
+      <span class="cp-title">拍板书</span>
+      <span class="cp-count" id="camCount">0 张</span>
+      <button class="cp-close" id="camClose" aria-label="关闭">×</button>
+    </div>
+    <div class="cp-stage">
+      <video id="camVideo" playsinline muted></video>
+      <div class="cp-hint" id="camHint">点「打开摄像头」开始</div>
+    </div>
+    <div class="cp-actions">
+      <button class="cp-btn ghost" id="camOpen">打开摄像头</button>
+      <button class="cp-btn primary" id="camShot" disabled>按快门</button>
+    </div>
+    <p class="cp-note" id="camNote">截图会存进知识库附件，生成笔记时按时间插到对应章节</p>
+  </div>
 
     <div class="cols">
       <!-- 左：工具条 + 转写 -->
