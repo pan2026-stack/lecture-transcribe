@@ -397,6 +397,19 @@ def diarize(session_id: str) -> dict:
     return {"labels": {str(k): n for k, n in zip(seqs, labels)}, "count": len(set(labels))}
 
 
+def _net_error_text(what: str, url: str, exc: Exception) -> str:
+    """把网络错误翻译成人能看懂的一句话"""
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, socket.gaierror):
+        return (f"{what}的域名解析失败（{reason}）。通常是切换代理/VPN 后系统 DNS 变了，"
+                f"重启一下本程序即可；如果一直这样，检查网络或关闭代理再试。")
+    text = str(reason)
+    if "UNEXPECTED_EOF" in text or "SSL" in text:
+        return (f"{what}的 TLS 连接被中断（{text[:60]}）。常见于代理节点不稳定，"
+                f"换节点或关掉代理后重试。")
+    return f"连不上{what}（{url}）：{text[:80]}"
+
+
 def transcribe(wav: bytes, language: str) -> str:
     cfg = load_config()
     key = cfg.get("api_key") or ""
@@ -420,18 +433,28 @@ def transcribe(wav: bytes, language: str) -> str:
             "Accept": "application/json",
         },
     )
-    ctx = ssl.create_default_context()
-    try:
-        with api_request(req, timeout=int(cfg.get("request_timeout", 90))) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            ctype_resp = resp.headers.get("Content-Type", "")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"识别接口返回 HTTP {exc.code}：{detail}") from None
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"连不上识别接口（{url}）：{exc.reason}") from None
-    except TimeoutError:
-        raise RuntimeError("识别接口超时，网络不稳或音频片段过长。") from None
+    # DNS 在代理/VPN 切换的瞬间常会失败一两秒，这里给它三次机会再报错
+    last_err = None
+    for attempt in range(3):
+        try:
+            with api_request(req, timeout=int(cfg.get("request_timeout", 90))) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                ctype_resp = resp.headers.get("Content-Type", "")
+            last_err = None
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"识别接口返回 HTTP {exc.code}：{detail}") from None
+        except urllib.error.URLError as exc:
+            last_err = exc
+            if isinstance(getattr(exc, "reason", None), socket.gaierror) and attempt < 2:
+                time.sleep(1.0)
+                continue
+            raise RuntimeError(_net_error_text("识别接口", url, exc)) from None
+        except TimeoutError:
+            raise RuntimeError("识别接口超时，网络不稳或音频片段过长。") from None
+    if last_err is not None:
+        raise RuntimeError(_net_error_text("识别接口", url, last_err)) from None
 
     if "json" in ctype_resp.lower() or raw.lstrip().startswith(("{", "[")):
         try:
