@@ -93,6 +93,9 @@ DEFAULT_CONFIG = {
     "shot_dir": "attachments",
     # 截图在笔记里怎么引用：wiki 用 ![[文件名]]，md 用 ![](attachments/文件名)
     "shot_link_style": "wiki",
+    # 出网方式：auto = 先直连，DNS/连接失败自动改走系统代理（推荐）
+    #           direct = 只直连；system = 只走系统代理；也可直接写代理地址
+    "api_proxy": "auto",
     # 延伸阅读最多给几条；4 是「一屏扫完」的经验值，可改
     "reading_list_max": 4,
 }
@@ -507,7 +510,7 @@ def chat_completion(system: str, user: str, temperature: float = 0.2) -> str:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=int(cfg.get("notes_timeout", 300))) as resp:
+        with api_request(req, timeout=int(cfg.get("notes_timeout", 300))) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:300]
@@ -976,34 +979,62 @@ CLIENT_LOG = LOGS / "client.log"
 
 
 _SSL_CTX = ssl.create_default_context()
-_API_OPENER = None
+_OPENERS: dict[bool, urllib.request.OpenerDirector] = {}
+_GOOD_MODE = None          # 上次成功的通道：direct / proxy
 
 
-def _api_opener(target_url: str = "") -> urllib.request.OpenerDirector:
-    """返回带代理策略的 opener。
-
-    注意：不要用 urlopen(..., context=…)。CPython 在传 context 时会临时
-    build_opener(HTTPSHandler)，那样会丢掉我们设置的「直连」策略，又跑回系统代理。
-    """
-    global _API_OPENER
-    mode = str(load_config().get("api_proxy") or "direct").strip()
-    key = (mode, target_url.split("/")[2] if "//" in target_url else "")
-    if _API_OPENER is not None and _API_OPENER[0] == key:
-        return _API_OPENER[1]
-    if mode in ("", "direct", "none", "off"):
-        handler = urllib.request.ProxyHandler({})
-    elif mode == "system":
-        handler = urllib.request.ProxyHandler()
-    else:
-        handler = urllib.request.ProxyHandler({"http": mode, "https": mode})
-    opener = urllib.request.build_opener(
-        handler, urllib.request.HTTPSHandler(context=_SSL_CTX))
-    _API_OPENER = (key, opener)
+def _api_opener(use_proxy: bool) -> urllib.request.OpenerDirector:
+    """直连 / 走系统代理 各准备一个 opener（都带我们的 SSLContext）"""
+    opener = _OPENERS.get(use_proxy)
+    if opener is None:
+        handler = urllib.request.ProxyHandler() if use_proxy else urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(
+            handler, urllib.request.HTTPSHandler(context=_SSL_CTX))
+        _OPENERS[use_proxy] = opener
     return opener
 
 
+def _proxy_mode() -> str:
+    return str(load_config().get("api_proxy") or "auto").strip().lower()
+
+
 def api_request(req: urllib.request.Request, timeout: float = 30):
-    return _api_opener(req.full_url).open(req, timeout=timeout)
+    """所有出网请求的统一入口。
+
+    auto 模式：先按上次成功的通道试，失败了换另一条。
+    典型场景：系统 DNS 被代理切换弄坏时，直连会报 getaddrinfo failed，
+    这时自动改走系统代理（代理自己解析域名）就能继续用。
+    """
+    global _GOOD_MODE
+    mode = _proxy_mode()
+
+    if mode in ("", "direct", "none", "off"):
+        return _api_opener(False).open(req, timeout=timeout)
+    if mode == "system":
+        return _api_opener(True).open(req, timeout=timeout)
+    if mode != "auto":
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": mode, "https": mode}),
+            urllib.request.HTTPSHandler(context=_SSL_CTX))
+        return opener.open(req, timeout=timeout)
+
+    order = (True, False) if _GOOD_MODE == "proxy" else (False, True)
+    last_err = None
+    for use_proxy in order:
+        try:
+            resp = _api_opener(use_proxy).open(req, timeout=timeout)
+            choice = "proxy" if use_proxy else "direct"
+            if _GOOD_MODE != choice:
+                _log(f"[net] 改用{'系统代理' if use_proxy else '直连'}")
+            _GOOD_MODE = choice
+            return resp
+        except urllib.error.HTTPError:
+            _GOOD_MODE = "proxy" if use_proxy else "direct"
+            raise
+        except (urllib.error.URLError, OSError) as exc:
+            last_err = exc
+            continue
+    raise last_err if last_err else RuntimeError("网络不可用")
 
 
 def install_api_opener() -> None:
@@ -1012,7 +1043,10 @@ def install_api_opener() -> None:
     浏览器可能开着代理看视频，但 Python 这边的请求没必要跟着走；
     国内接口（DeepSeek / 硅基流动）走系统代理经常 TLS 被断。
     """
-    mode = str(load_config().get("api_proxy") or "direct").strip()
+    mode = str(load_config().get("api_proxy") or "auto").strip().lower()
+    if mode == "auto":
+        _log("[net] API 请求：先直连，失败自动走系统代理")
+        return
     if mode in ("", "direct", "none", "off"):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         label = "直连（忽略系统代理）"
@@ -1101,7 +1135,7 @@ def _notes_chat(cfg: dict, messages: list, max_tokens: int) -> tuple[str, str]:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=int(cfg.get("notes_timeout", 300))) as resp:
+            with api_request(req, timeout=int(cfg.get("notes_timeout", 300))) as resp:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
             choice = data["choices"][0]
             return choice["message"]["content"], (choice.get("finish_reason") or "")
@@ -1164,7 +1198,7 @@ def _probe_outbound() -> bool:
     url = os.environ.get("DICT_PROBE_TARGET") or cfg.get("notes_base_url") or "https://api.deepseek.com"
     try:
         req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=6):
+        with api_request(req, timeout=6):
             return True
     except urllib.error.HTTPError:
         return True
