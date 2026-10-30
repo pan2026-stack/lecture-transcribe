@@ -1,11 +1,11 @@
 ﻿$ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$target = Join-Path $root '启动.bat'
+$target = Join-Path $root '课堂转写.bat'
 $icon = Join-Path $root 'app.ico'
 
 if (-not (Test-Path $target)) {
-    Write-Host "找不到 启动.bat，请确认这个脚本和解压后的程序放在一起。" -ForegroundColor Red
+    Write-Host "找不到 课堂转写.bat，请确认这个脚本和解压后的程序放在一起。" -ForegroundColor Red
     exit 1
 }
 

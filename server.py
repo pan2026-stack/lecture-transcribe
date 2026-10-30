@@ -998,6 +998,43 @@ def _proxy_mode() -> str:
     return str(load_config().get("api_proxy") or "auto").strip().lower()
 
 
+_PROXY_ALIVE = {"at": 0.0, "ok": False}
+
+
+def _win_proxy_settings() -> tuple[bool, str]:
+    """读注册表里的系统代理开关与地址（不依赖 urllib 的缓存）"""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+        server, _ = winreg.QueryValueEx(key, "ProxyServer")
+        return bool(enable), str(server or "")
+    except OSError:
+        return False, ""
+
+
+def _proxy_alive() -> bool:
+    """系统代理是否真的可用：开着 + 端口能连上。结果缓存 5 秒"""
+    now = time.time()
+    if now - _PROXY_ALIVE["at"] < 5:
+        return bool(_PROXY_ALIVE["ok"])
+    enable, server = _win_proxy_settings()
+    ok = False
+    if enable and server:
+        host, _, port = server.rpartition(":")
+        host = host or "127.0.0.1"
+        try:
+            sock = socket.create_connection((host, int(port or 0)), timeout=0.6)
+            sock.close()
+            ok = True
+        except (OSError, ValueError):
+            ok = False
+    _PROXY_ALIVE.update(at=now, ok=ok)
+    return ok
+
+
 def api_request(req: urllib.request.Request, timeout: float = 30):
     """所有出网请求的统一入口。
 
@@ -1018,7 +1055,13 @@ def api_request(req: urllib.request.Request, timeout: float = 30):
             urllib.request.HTTPSHandler(context=_SSL_CTX))
         return opener.open(req, timeout=timeout)
 
-    order = (True, False) if _GOOD_MODE == "proxy" else (False, True)
+    if not _proxy_alive():
+        # 代理已关或端口已死：别再往它上面撞
+        order = (False,)
+    elif _GOOD_MODE == "proxy":
+        order = (True, False)
+    else:
+        order = (False, True)
     last_err = None
     for use_proxy in order:
         try:
@@ -1034,7 +1077,10 @@ def api_request(req: urllib.request.Request, timeout: float = 30):
         except (urllib.error.URLError, OSError) as exc:
             last_err = exc
             continue
-    raise last_err if last_err else RuntimeError("网络不可用")
+    reason = str(last_err) if last_err else "网络不可用"
+    if _proxy_alive():
+        reason += "（直连和系统代理都试过了）"
+    raise RuntimeError(reason) from None
 
 
 def install_api_opener() -> None:
@@ -1068,7 +1114,7 @@ def _proxy_hint() -> str:
     except Exception:
         return ""
     proxy = proxies.get("https") or proxies.get("http") or ""
-    if not proxy:
+    if not proxy or not _proxy_alive():
         return ""
     return (f"（配置项 api_proxy 现在是 system，走系统代理 {proxy}；"
             f"国内接口建议改成 direct 直连）")
