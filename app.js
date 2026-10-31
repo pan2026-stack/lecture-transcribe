@@ -2259,8 +2259,8 @@
     if (!notesRaw) return;
     const txt = (lastArticle || '').trim();
     notesRaw.innerHTML = txt
-      ? `<div>${txt.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`
-      : '<p class="raw-empty">还没有整理出原文</p>';
+      ? '<h4>完整原文</h4><div>' + txt.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>'
+      : '<h4>完整原文</h4><p class="raw-empty">还没有整理出原文</p>';
   }
 
 
@@ -4563,6 +4563,9 @@
   historyModal.addEventListener('click', (e) => { if (e.target === historyModal) historyModal.classList.add('hidden'); });
 
   $('btnCloseNotes').addEventListener('click', () => notesModal.classList.add('hidden'));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !notesModal.classList.contains('hidden')) notesModal.classList.add('hidden');
+  });
   notesModal.addEventListener('click', (e) => {
     if (e.target === notesModal) notesModal.classList.add('hidden');
   });

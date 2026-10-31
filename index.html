@@ -288,8 +288,9 @@
 
 <!-- 笔记 -->
 <div class="modal hidden" id="notesModal">
-  <div class="modal-card wide">
-    <div class="notes-head">
+  <div class="modal-card wide notes-card">
+    <div class="nm-head">
+      <span class="nm-title">笔记</span>
       <div class="tabs">
         <button class="tab active" data-tab="notes">结构化笔记</button>
         <button class="tab" data-tab="article">完整原文</button>
@@ -299,8 +300,8 @@
         <button class="ghost" id="btnDownloadPdf" data-fmt="pdf">PDF</button>
         <button class="ghost" id="btnDownloadHtml" data-fmt="html">HTML</button>
         <button class="ghost" id="btnCopyNotes">复制</button>
-        <button class="ghost" id="btnCloseNotes">关闭</button>
       </div>
+      <button class="nm-close" id="btnCloseNotes" aria-label="关闭">×</button>
     </div>
     <div class="notes-cols">
       <aside class="notes-nav" id="notesNav"></aside>

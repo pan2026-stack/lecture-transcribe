@@ -3098,3 +3098,381 @@ html[data-theme="dark"] .cfg-track { background: #33404f; }
 html[data-theme="dark"] .cfg-track::after { background: #dfe7f0; }
 html[data-theme="dark"] .cfg-foot { background: var(--panel); }
 html[data-theme="dark"] .cfg-close:hover { background: rgba(255, 255, 255, .07); }
+
+
+/* ================================================================
+   处理页 + 笔记弹窗：与设置弹窗统一
+   ================================================================ */
+
+/* ---------- 处理页：左侧列表 ---------- */
+.jobs-panel .jp-left {
+  width: 246px;
+  padding: 12px 10px 12px 12px;
+  border-right: 1px solid var(--line);
+  background: transparent;
+}
+.jobs-panel .jp-search .hist-search {
+  height: 34px;
+  padding: 0 11px;
+  font-size: 12px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--bg-deep);
+  color: var(--ink);
+}
+.jobs-panel .jp-search .hist-search:focus {
+  outline: none;
+  border-color: var(--khaki);
+  box-shadow: 0 0 0 3px var(--khaki-dim);
+}
+.jobs-panel .hist-chips {
+  display: flex;
+  gap: 3px;
+  margin: 10px 0 12px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--bg-deep);
+}
+.jobs-panel .hist-chip {
+  flex: 1;
+  height: 26px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 7px;
+  font-size: 10.5px;
+  white-space: nowrap;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.jobs-panel .hist-chip:hover { color: var(--ink); }
+.jobs-panel .hist-chip.on {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(20, 30, 45, .08);
+}
+
+.jobs-panel .hist-list { display: flex; flex-direction: column; gap: 2px; }
+.jobs-panel .file-row {
+  padding: 8px 10px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
+  gap: 3px;
+}
+.jobs-panel .file-row:hover { background: rgba(28, 120, 170, .07); }
+.jobs-panel .file-row.is-on {
+  background: var(--panel);
+  border-left-color: var(--khaki);
+  box-shadow: 0 1px 2px rgba(20, 30, 45, .06);
+}
+.jobs-panel .file-row .fn {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+  line-height: 1.45;
+}
+.jobs-panel .file-row .fmeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.jobs-panel .file-row .fk {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-weight: 500;
+}
+.jobs-panel .file-row .row-act {
+  opacity: 0;
+  height: 22px;
+  padding: 0 7px;
+  font-size: 10.5px;
+  border-radius: 6px;
+  transition: opacity .15s;
+}
+.jobs-panel .file-row:hover .row-act,
+.jobs-panel .file-row.is-on .row-act { opacity: 1; }
+
+/* ---------- 处理页：中间文档 ---------- */
+.jobs-panel .jp-doc-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 16px 24px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+}
+.jobs-panel .jp-doc-title { font-size: 17px; font-weight: 600; letter-spacing: .01em; }
+.jobs-panel .jp-doc-meta { margin-top: 5px; font-size: 11px; color: var(--faint); display: flex; gap: 8px; align-items: center; }
+.jobs-panel .jp-doc-actions { display: flex; gap: 6px; margin-top: 11px; }
+.jobs-panel .jp-doc-actions button {
+  height: 28px;
+  padding: 0 11px;
+  font-size: 11.5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+.jobs-panel .jp-doc-actions button:hover:not(:disabled) {
+  border-color: var(--khaki);
+  color: var(--khaki);
+  background: var(--panel);
+}
+.jobs-panel .jp-doc-actions button.primary {
+  background: var(--khaki);
+  border-color: var(--khaki);
+  color: #fff;
+}
+.jobs-panel .jp-doc-actions button:disabled { opacity: .5; cursor: default; }
+.jobs-panel .jp-doc-body {
+  padding: 18px 24px 28px;
+  font-size: 13px;
+  line-height: 1.92;
+  color: var(--ink);
+}
+.jobs-panel .jp-doc-body p { margin: 9px 0; }
+.jobs-panel .jp-doc-body h3 {
+  margin: 22px 0 9px;
+  padding-left: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+  border-left: 3px solid var(--khaki);
+  line-height: 1.4;
+}
+.jobs-panel .jp-doc-body h3:first-child { margin-top: 2px; }
+.jobs-panel .jp-doc-body li { margin: 5px 0; }
+.jobs-panel .jp-doc-body li::marker { color: var(--khaki); }
+.jobs-panel .jp-doc-body code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-deep);
+}
+
+/* ---------- 处理页：右侧章节 ---------- */
+.jobs-panel .jp-right {
+  width: 218px;
+  padding: 14px 12px;
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+}
+.jobs-panel .jp-right h4 {
+  margin: 0 0 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  color: var(--faint);
+}
+.jobs-panel .jp-right a {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+  text-decoration: none;
+}
+.jobs-panel .jp-right a:hover { background: rgba(28, 120, 170, .08); color: var(--ink); }
+.jobs-panel .jp-right a b {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--khaki);
+  white-space: nowrap;
+}
+
+/* ---------- 处理页：空态 ---------- */
+.jobs-panel .jp-empty { gap: 8px; color: var(--faint); }
+.jobs-panel .jp-empty-icon {
+  width: 46px; height: 46px;
+  display: grid; place-items: center;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg-deep);
+  box-shadow: none;
+  color: var(--faint);
+}
+.jobs-panel .jp-empty p { font-size: 12.5px; font-weight: 500; color: var(--muted); margin: 0; }
+.jobs-panel .jp-empty span { font-size: 11px; }
+
+/* ---------- 笔记弹窗 ---------- */
+.modal-card.modal-card.notes-card {
+  width: min(1180px, 94vw);
+  max-width: 1180px;
+  height: 84vh;
+  max-height: 84vh;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 14px;
+}
+.nm-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 14px 11px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex: none;
+}
+.nm-title { font-size: 14px; font-weight: 600; }
+.nm-head .tabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--bg-deep);
+}
+.nm-head .tabs .tab {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.nm-head .tabs .tab.active {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(20, 30, 45, .08);
+}
+.nm-head .notes-actions { margin-left: auto; display: flex; gap: 6px; }
+.nm-head .notes-actions .ghost {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+}
+.nm-head .notes-actions .ghost:hover { border-color: var(--khaki); color: var(--khaki); }
+.nm-close {
+  width: 28px; height: 28px;
+  border: 0; border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px; line-height: 1;
+  cursor: pointer;
+}
+.nm-close:hover { background: var(--bg-deep); color: var(--ink); }
+
+.notes-card .notes-cols { flex: 1; display: flex; min-height: 0; }
+.notes-card .notes-nav {
+  width: 200px;
+  flex: none;
+  padding: 14px 12px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+}
+.notes-card .notes-nav h4 {
+  margin: 0 0 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  color: var(--faint);
+}
+.notes-card .notes-nav a {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+  text-decoration: none;
+}
+.notes-card .notes-nav a b {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--khaki);
+  margin-right: 5px;
+}
+.notes-card .notes-nav a:hover { background: rgba(28, 120, 170, .08); color: var(--ink); }
+.notes-card .notes-nav .nav-empty { font-size: 11px; color: var(--faint); }
+
+.notes-card .notes-body {
+  flex: 1;
+  min-width: 0;
+  padding: 22px 32px 30px;
+  overflow-y: auto;
+  font-size: 13.5px;
+  line-height: 1.92;
+}
+.notes-card .notes-body h2,
+.notes-card .notes-body h3 {
+  margin: 26px 0 10px;
+  padding-left: 10px;
+  font-size: 14.5px;
+  font-weight: 600;
+  border-left: 3px solid var(--khaki);
+  line-height: 1.45;
+}
+.notes-card .notes-body h2:first-child,
+.notes-card .notes-body h3:first-child { margin-top: 0; }
+.notes-card .notes-body h4 { margin: 16px 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.notes-card .notes-body p { margin: 8px 0; }
+.notes-card .notes-body li { margin: 5px 0; }
+.notes-card .notes-body li::marker { color: var(--khaki); }
+.notes-card .notes-body code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-deep);
+}
+
+.notes-card .notes-raw {
+  width: 268px;
+  flex: none;
+  padding: 14px 16px;
+  overflow-y: auto;
+  border-right: 0;
+  border-left: 1px solid var(--line);
+  background: var(--panel-2);
+  font-size: 12px;
+  line-height: 1.85;
+  color: var(--muted);
+}
+.notes-card .notes-raw h4 {
+  position: sticky;
+  top: -14px;
+  margin: -14px -16px 10px;
+  padding: 14px 16px 8px;
+  background: var(--panel-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  color: var(--faint);
+}
+.notes-card .notes-raw .raw-empty { font-size: 11px; color: var(--faint); }
+
+.notes-card .paths {
+  margin: 0;
+  padding: 9px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+/* 深色微调 */
+html[data-theme="dark"] .jobs-panel .file-row:hover,
+html[data-theme="dark"] .jobs-panel .jp-right a:hover,
+html[data-theme="dark"] .notes-card .notes-nav a:hover { background: rgba(88, 169, 214, .10); }
+html[data-theme="dark"] .jobs-panel .hist-chip.on,
+html[data-theme="dark"] .nm-head .tabs .tab.active { box-shadow: 0 1px 2px rgba(0, 0, 0, .4); }
+html[data-theme="dark"] .jobs-panel .file-row .fk.k笔记 { color: #8fd9b2; }
