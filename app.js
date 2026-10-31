@@ -3511,6 +3511,86 @@
     }
   }
 
+  // ---------------- 拍板书：缩放 / 取景 ----------------
+  const ZOOM_STEPS = [1, 1.5, 2, 3, 4];
+  let camZoom = 1;          // 当前倍率
+  let camCx = 0.5;          // 取景中心（相对原图 0..1）
+  let camCy = 0.5;
+
+  function camClampCenter() {
+    const half = 0.5 / camZoom;
+    camCx = Math.min(1 - half, Math.max(half, camCx));
+    camCy = Math.min(1 - half, Math.max(half, camCy));
+  }
+
+  function camApplyTransform() {
+    if (!camVideo) return;
+    camClampCenter();
+    const tx = -(camCx * camZoom - 0.5) * 100;
+    const ty = -(camCy * camZoom - 0.5) * 100;
+    camVideo.style.transform = `translate(${tx}%, ${ty}%) scale(${camZoom})`;
+    if ($('camZoomVal')) $('camZoomVal').textContent = Math.round(camZoom * 100) + '%';
+  }
+
+  function camSetZoom(next) {
+    const steps = ZOOM_STEPS;
+    const from = steps.reduce((best, v) => (Math.abs(v - camZoom) < Math.abs(best - camZoom) ? v : best), steps[0]);
+    let idx = steps.indexOf(from);
+    idx = Math.min(steps.length - 1, Math.max(0, idx + next));
+    camZoom = steps[idx];
+    camApplyTransform();
+  }
+
+  function camResetView() {
+    camZoom = 1;
+    camCx = 0.5;
+    camCy = 0.5;
+    camApplyTransform();
+  }
+
+  // 拖动 / 滚轮 / 双击
+  (function initCamZoom() {
+    const stage = $('camStage');
+    if (!stage) return;
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    stage.addEventListener('pointerdown', (e) => {
+      if (!camStream) return;
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      stage.classList.add('dragging');
+      try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    stage.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const rect = stage.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      // 画面里移动 1px，相当于取景中心移动 1/(宽*倍率)
+      camCx -= (e.clientX - lastX) / (rect.width * camZoom);
+      camCy -= (e.clientY - lastY) / (rect.height * camZoom);
+      lastX = e.clientX;
+      lastY = e.clientY;
+      camApplyTransform();
+    });
+    const stop = () => { dragging = false; stage.classList.remove('dragging'); };
+    stage.addEventListener('pointerup', stop);
+    stage.addEventListener('pointercancel', stop);
+
+    stage.addEventListener('wheel', (e) => {
+      if (!camStream) return;
+      e.preventDefault();
+      camSetZoom(e.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+
+    stage.addEventListener('dblclick', () => camResetView());
+
+    if ($('camZoomIn')) $('camZoomIn').addEventListener('click', () => camSetZoom(1));
+    if ($('camZoomOut')) $('camZoomOut').addEventListener('click', () => camSetZoom(-1));
+  })();
+
   function resetShots() {
     shots = [];
     updateCamCount();
@@ -3604,7 +3684,8 @@
     }
     try {
       camStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        // 用 1080p 起，放大取景时才有像素余量
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       });
       if (camVideo) {
@@ -3615,6 +3696,7 @@
       if (camShotBtn) camShotBtn.disabled = false;
       if (camOpenBtn) camOpenBtn.textContent = '重连摄像头';
       showCamHint('');
+      camResetView();
     } catch (err) {
       const name = (err && err.name) || '';
       if (name === 'NotAllowedError') showCamHint('摄像头权限被拒绝，点地址栏左边的图标允许一下');
@@ -3638,6 +3720,7 @@
     if (camShotBtn) camShotBtn.disabled = true;
     if (camOpenBtn) camOpenBtn.textContent = '打开摄像头';
     showCamHint('点「打开摄像头」开始');
+    camResetView();
   }
 
   let pendingShot = null;   // 正在上传的那一张，保存前要等它完成
@@ -3650,17 +3733,23 @@
     }
     const w = camVideo.videoWidth;
     const h = camVideo.videoHeight;
+    // 按当前取景裁剪：从原帧里切一块，而不是把预览画面放大
+    const sw = w / camZoom;
+    const sh = h / camZoom;
+    const sx = Math.min(w - sw, Math.max(0, camCx * w - sw / 2));
+    const sy = Math.min(h - sh, Math.max(0, camCy * h - sh / 2));
     camBusy = true;
     camShotBtn.disabled = true;
     const task = { at: Date.now() };
     pendingShot = task;
     try {
       const maxW = 1600;
-      const scale = Math.min(1, maxW / w);
+      const scale = Math.min(1, maxW / sw);
       const canvas = document.createElement('canvas');
-      canvas.width = Math.round(w * scale);
-      canvas.height = Math.round(h * scale);
-      canvas.getContext('2d').drawImage(camVideo, 0, 0, canvas.width, canvas.height);
+      canvas.width = Math.round(sw * scale);
+      canvas.height = Math.round(sh * scale);
+      canvas.getContext('2d').drawImage(
+        camVideo, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
       const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.82));
       if (!blob) throw new Error('画面还没准备好');
       const sec = shotSeconds();

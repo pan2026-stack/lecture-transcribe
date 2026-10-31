@@ -2690,3 +2690,37 @@ body.hourslow .hour-chip-fly { transition-duration: 1.84s, 1.84s, .9s; }
   box-shadow: 0 6px 18px rgba(20, 34, 52, .16);
   cursor: zoom-in;
 }
+
+
+/* 拍板书：缩放与取景 */
+.camera-panel .cp-stage { overflow: hidden; cursor: grab; touch-action: none; }
+.camera-panel .cp-stage.dragging { cursor: grabbing; }
+.camera-panel video {
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.camera-panel .cp-zoom {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+}
+.camera-panel .cp-zbtn {
+  width: 26px; height: 26px;
+  border: 0; border-radius: 8px;
+  font-size: 15px; line-height: 1;
+  color: #46536a;
+  background: rgba(158, 172, 193, .16);
+  cursor: pointer;
+}
+.camera-panel .cp-zbtn:hover { background: rgba(158, 172, 193, .28); }
+.camera-panel .cp-zbtn:active { transform: scale(.94); }
+.camera-panel .cp-zval {
+  min-width: 46px; text-align: center;
+  font-size: 11.5px; color: #5a6675;
+  font-variant-numeric: tabular-nums;
+}
+.camera-panel .cp-zhint {
+  font-size: 10.5px; color: #97a1ae;
+  margin-left: auto; white-space: nowrap;
+}
