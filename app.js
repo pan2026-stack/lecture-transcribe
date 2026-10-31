@@ -3512,10 +3512,21 @@
   }
 
   // ---------------- 拍板书：缩放 / 取景 ----------------
-  const ZOOM_STEPS = [1, 1.5, 2, 3, 4];
+  const ZOOM_STEPS = [1, 1.5, 2, 3];          // 再大就糊了，最多 3 倍
   let camZoom = 1;          // 当前倍率
   let camCx = 0.5;          // 取景中心（相对原图 0..1）
   let camCy = 0.5;
+
+  let camNoteTimer = null;
+
+  function camFlashNote(text, ms = 2400) {
+    if (!camNote) return;
+    camNote.textContent = text;
+    if (camNoteTimer) clearTimeout(camNoteTimer);
+    camNoteTimer = setTimeout(() => {
+      if (camNote) camNote.textContent = '截图会存进知识库附件，生成笔记时按时间插到对应章节';
+    }, ms);
+  }
 
   function camClampCenter() {
     const half = 0.5 / camZoom;
@@ -3525,6 +3536,7 @@
 
   function camApplyTransform() {
     if (!camVideo) return;
+    camZoom = Math.min(3, Math.max(1, camZoom));
     camClampCenter();
     const tx = -(camCx * camZoom - 0.5) * 100;
     const ty = -(camCy * camZoom - 0.5) * 100;
@@ -3643,7 +3655,15 @@
       const vh = camVideo.videoHeight;
       const selW = Math.max(16, Math.min(vw, b.x - a.x));
       const selH = Math.max(9, Math.min(vh, b.y - a.y));
-      camZoom = Math.min(4, Math.max(1, vw / selW));
+      // 最小框 = 画面 1/3 宽，对应最大 3 倍；再小就糊成一片
+      const minSelW = vw / 3;
+      if (selW < minSelW - 1) {
+        camFlashNote('框太小了，至少圈到画面的三分之一');
+        return;
+      }
+      camZoom = Math.min(3, Math.max(1, vw / selW));
+      if (camNoteTimer) { clearTimeout(camNoteTimer); camNoteTimer = null; }
+      if (camNote) camNote.textContent = '截图会存进知识库附件，生成笔记时按时间插到对应章节';
       camCx = Math.min(1, Math.max(0, (a.x + selW / 2) / vw));
       camCy = Math.min(1, Math.max(0, (a.y + selH / 2) / vh));
       camApplyTransform();
