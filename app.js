@@ -3548,36 +3548,108 @@
     camApplyTransform();
   }
 
-  // 拖动 / 滚轮 / 双击
-  (function initCamZoom() {
+  // 在预览上拖一个框 → 只看这块（框按 16:9 约束，和画面同比例）
+  (function initCamSelect() {
     const stage = $('camStage');
-    if (!stage) return;
+    const box = $('camSelect');
+    if (!stage || !box) return;
+
     let dragging = false;
-    let lastX = 0;
-    let lastY = 0;
+    let startX = 0;
+    let startY = 0;
+
+    function stageRect() {
+      return stage.getBoundingClientRect();
+    }
+
+    // 舞台坐标 → 视频像素坐标（预览是 object-fit: cover，会裁掉边）
+    function stageToVideo(px, py, rect) {
+      const vw = camVideo.videoWidth || 1920;
+      const vh = camVideo.videoHeight || 1080;
+      const videoAspect = vw / vh;
+      const stageAspect = rect.width / rect.height;
+      if (videoAspect > stageAspect) {
+        // 以高度为准，左右被裁
+        const shownW = rect.height * videoAspect;
+        const offX = (rect.width - shownW) / 2;
+        return {
+          x: ((px - offX) / shownW) * vw,
+          y: (py / rect.height) * vh,
+        };
+      }
+      const shownH = rect.width / videoAspect;
+      const offY = (rect.height - shownH) / 2;
+      return {
+        x: (px / rect.width) * vw,
+        y: ((py - offY) / shownH) * vh,
+      };
+    }
+
+    function drawBox(x1, y1, x2, y2) {
+      const left = Math.min(x1, x2);
+      const top = Math.min(y1, y2);
+      box.style.left = left + 'px';
+      box.style.top = top + 'px';
+      box.style.width = Math.abs(x2 - x1) + 'px';
+      box.style.height = Math.abs(y2 - y1) + 'px';
+      box.classList.remove('hidden');
+    }
+
+    function hideBox() {
+      box.classList.add('hidden');
+    }
 
     stage.addEventListener('pointerdown', (e) => {
-      if (!camStream) return;
+      if (!camStream || !camVideo.videoWidth) return;
+      const rect = stageRect();
       dragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
+      startX = e.clientX - rect.left;
+      startY = e.clientY - rect.top;
+      drawBox(startX, startY, startX, startY);
       stage.classList.add('dragging');
       try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+      e.preventDefault();
     });
+
     stage.addEventListener('pointermove', (e) => {
       if (!dragging) return;
-      const rect = stage.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      // 画面里移动 1px，相当于取景中心移动 1/(宽*倍率)
-      camCx -= (e.clientX - lastX) / (rect.width * camZoom);
-      camCy -= (e.clientY - lastY) / (rect.height * camZoom);
-      lastX = e.clientX;
-      lastY = e.clientY;
-      camApplyTransform();
+      const rect = stageRect();
+      const x = Math.min(rect.width, Math.max(0, e.clientX - rect.left));
+      const y = Math.min(rect.height, Math.max(0, e.clientY - rect.top));
+      // 按 16:9 调整：先取宽，再按画面比例算高
+      let w = Math.abs(x - startX);
+      let h = Math.abs(y - startY);
+      const ratio = 16 / 9;
+      if (h * ratio < w) h = w / ratio;
+      else w = h * ratio;
+      const x2 = startX + Math.sign(x - startX || 1) * w;
+      const y2 = startY + Math.sign(y - startY || 1) * h;
+      drawBox(startX, startY, x2, y2);
     });
-    const stop = () => { dragging = false; stage.classList.remove('dragging'); };
-    stage.addEventListener('pointerup', stop);
-    stage.addEventListener('pointercancel', stop);
+
+    const finish = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      stage.classList.remove('dragging');
+      const rect = stageRect();
+      const boxRect = box.getBoundingClientRect();
+      hideBox();
+      if (!rect.width || !boxRect.width || boxRect.width < rect.width * 0.06) {
+        return;                       // 框太小，当作误触
+      }
+      const a = stageToVideo(boxRect.left - rect.left, boxRect.top - rect.top, rect);
+      const b = stageToVideo(boxRect.right - rect.left, boxRect.bottom - rect.top, rect);
+      const vw = camVideo.videoWidth;
+      const vh = camVideo.videoHeight;
+      const selW = Math.max(16, Math.min(vw, b.x - a.x));
+      const selH = Math.max(9, Math.min(vh, b.y - a.y));
+      camZoom = Math.min(4, Math.max(1, vw / selW));
+      camCx = Math.min(1, Math.max(0, (a.x + selW / 2) / vw));
+      camCy = Math.min(1, Math.max(0, (a.y + selH / 2) / vh));
+      camApplyTransform();
+    };
+    stage.addEventListener('pointerup', finish);
+    stage.addEventListener('pointercancel', finish);
 
     stage.addEventListener('wheel', (e) => {
       if (!camStream) return;
@@ -3589,6 +3661,7 @@
 
     if ($('camZoomIn')) $('camZoomIn').addEventListener('click', () => camSetZoom(1));
     if ($('camZoomOut')) $('camZoomOut').addEventListener('click', () => camSetZoom(-1));
+    if ($('camZoomReset')) $('camZoomReset').addEventListener('click', () => camResetView());
   })();
 
   function resetShots() {
