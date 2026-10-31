@@ -1334,10 +1334,15 @@ def _generate_notes(payload: dict) -> dict:
     title = (payload.get("title") or "课堂记录").strip()
     max_tokens = int(cfg.get("notes_max_tokens") or 8192)
     system_prompt = NOTE_PROMPT.replace("__MAX_READS__", str(cfg.get("reading_list_max", 4)))
+    has_spk = any(seg.get("spk") for seg in segments)
+    if has_spk:
+        system_prompt += (
+            "\n\n【说话人】转写稿的行首可能带「发言人一：」这类前缀。"
+            "整理讲稿时要保留该前缀，并让不同发言人各自成段，"
+            "不要把两个人的话合并成一句；章节标题不受影响。"
+        )
 
-    transcript = "\n".join(
-        f"[{s.get('time', '--:--')}] {str(s.get('text', '')).strip()}" for s in segments
-    )
+    transcript = "\n".join(_seg_line(s) for s in segments)
     total_chars = len(transcript)
     print(f"[notes] 转写稿 {len(segments)} 段 / {total_chars} 字")
     _progress(job, stage="start", done=0, total=1, text="正在准备")
@@ -1351,7 +1356,7 @@ def _generate_notes(payload: dict) -> dict:
             chunk_size = int(cfg.get("notes_chunk_chars") or 14000)
             chunks, buf, used = [], [], 0
             for seg in segments:
-                line = f"[{seg.get('time', '--:--')}] {str(seg.get('text', '')).strip()}"
+                line = _seg_line(seg)
                 if used + len(line) > chunk_size and buf:
                     chunks.append(buf)
                     buf, used = [], 0
@@ -1372,6 +1377,8 @@ def _generate_notes(payload: dict) -> dict:
                         "要求：每个 `## 小标题` 前面加一个时间标记，写成 `[[05:12]] ## 一、标题`，"
                         "时间取该小节在转写稿里开始的那个时间戳。正文其它地方不要出现时间标记。\n"
                         "只输出整理后的正文，不要写「第一部分」之类的前后缀，不要总结。"
+                        + ("如果某行以「发言人一：」这类前缀开头，整理时保留前缀，"
+                           "不同发言人的话不要合并成一句。\n" if any(x.get("spk") for x in chunk) else "")
                     )},
                     {"role": "user", "content": "\n".join(chunk)},
                 ]
@@ -1943,6 +1950,27 @@ def _vault_candidates():
         return []
 
 
+_CN_NUM = "一二三四五六七八九十"
+
+
+def _spk_name(n) -> str:
+    """声纹编号 → 发言人一 / 二 / 三……"""
+    try:
+        i = int(n)
+    except (TypeError, ValueError):
+        return ""
+    if i <= 0:
+        return ""
+    return "发言人" + (_CN_NUM[i - 1] if i <= 10 else str(i))
+
+
+def _seg_line(seg: dict) -> str:
+    """一行转写：[时间] 发言人X：内容（没有声纹时就没有前缀）"""
+    label = _spk_name(seg.get("spk"))
+    text = str(seg.get("text", "")).strip()
+    return f"[{seg.get('time', '--:--')}] {label + '：' if label else ''}{text}"
+
+
 def save_session(payload: dict) -> str:
     SESSIONS.mkdir(parents=True, exist_ok=True)
     title = (payload.get("title") or "课堂记录").strip()
@@ -1962,12 +1990,16 @@ def save_session(payload: dict) -> str:
         "",
     ]
     for seg in segments:
-        lines.append(f"[{seg.get('time', '--:--')}] {str(seg.get('text', '')).strip()}")
+        lines.append(_seg_line(seg))
         tr = str(seg.get("tr", "")).strip()
         if tr:
             lines.append(f"    ↳ {tr}")
     lines += ["", "## 纯文本（便于复制整理）", "", ""]
-    lines.append("".join(str(s.get("text", "")).strip() for s in segments))
+    plain_bits = []
+    for seg in segments:
+        label = _spk_name(seg.get("spk"))
+        plain_bits.append((label + "：" if label else "") + str(seg.get("text", "")).strip())
+    lines.append("".join(plain_bits))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
         record_stats(payload)

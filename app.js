@@ -2045,6 +2045,7 @@
         } catch (_) { /* 单段失败不影响整体 */ }
       }
       snapshot.sort((a, b) => (a.seq || 0) - (b.seq || 0));
+    snapshot.forEach((item) => { item.spk = spkLabels[String(item.seq)] || 0; });
     }
 
     if (!snapshot.length) {
@@ -2127,6 +2128,7 @@
   }
 
   async function saveSession() {
+    try { await refreshSpeakers(); } catch (_) {}
     const usable = segments.filter((s) => (s.text || '').trim())
       .slice().sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     if (!usable.length) {
@@ -2140,7 +2142,10 @@
         body: JSON.stringify({
           title: `课堂记录 ${new Date().toLocaleDateString('zh-CN')}`,
           duration: durationText(),
-          segments: usable.map((s) => ({ time: s.time, text: s.text, tr: s.tr || '' })),
+          segments: usable.map((s) => ({
+            time: s.time, text: s.text, tr: s.tr || '',
+            spk: spkLabels[String(s.seq)] || 0,
+          })),
         }),
       });
       const data = await res.json();
