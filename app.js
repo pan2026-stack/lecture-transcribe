@@ -3505,9 +3505,19 @@
   }
 
   function showCamHint(text) {
-    if (camHint) {
-      camHint.textContent = text;
-      camHint.style.display = text ? 'flex' : 'none';
+    const empty = $('camEmpty');
+    if (text) {
+      if (camHint) {
+        camHint.textContent = text;
+        camHint.classList.remove('hidden');
+      }
+      if (empty) empty.classList.add('hidden');
+    } else {
+      if (camHint) {
+        camHint.textContent = '';
+        camHint.classList.add('hidden');
+      }
+      if (empty) empty.classList.toggle('hidden', !!camStream);
     }
   }
 
@@ -3892,7 +3902,7 @@
     }
     if (camShotBtn) camShotBtn.disabled = true;
     if (camOpenBtn) camOpenBtn.textContent = '打开摄像头';
-    showCamHint('点「打开摄像头」开始');
+    showCamHint('');
     camResetView();
   }
 
@@ -4385,6 +4395,10 @@
 
   btnSettings.addEventListener('click', () => $('modal').classList.remove('hidden'));
   $('btnCancel').addEventListener('click', () => $('modal').classList.add('hidden'));
+  if ($('btnCfgClose')) $('btnCfgClose').addEventListener('click', () => $('modal').classList.add('hidden'));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('modal').classList.contains('hidden')) $('modal').classList.add('hidden');
+  });
   $('btnSaveCfg').addEventListener('click', saveConfig);
   $('btnCopyNotes').addEventListener('click', copyNotes);
   // 笔记弹窗：Word / PDF / HTML

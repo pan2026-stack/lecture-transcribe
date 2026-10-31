@@ -63,7 +63,14 @@
     <div class="cp-stage" id="camStage">
       <video id="camVideo" playsinline muted></video>
       <div class="cp-select hidden" id="camSelect"><span class="cp-select-zoom" id="camSelectZoom">×2.0</span></div>
-      <div class="cp-hint" id="camHint">点「打开摄像头」开始</div>
+      <div class="cp-empty" id="camEmpty">
+        <span class="cp-empty-ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="34" height="34"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1-1.6c.3-.5.8-.8 1.4-.8h4c.6 0 1.1.3 1.4.8l1 1.6h1.2A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-8Z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12.4" r="3.1" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+        </span>
+        <b>摄像头还没打开</b>
+        <span class="cp-empty-sub">点下面的「打开摄像头」，画面会出现在这里</span>
+      </div>
+      <div class="cp-hint hidden" id="camHint"></div>
     </div>
     <div class="cp-zoom">
       <button class="cp-zbtn" id="camZoomOut" aria-label="缩小">−</button>
@@ -306,31 +313,88 @@
 
 <!-- 设置 -->
 <div class="modal hidden" id="modal">
-  <div class="modal-card">
-    <h2>接口设置</h2>
-    <p class="hint">识别用 OpenAI 兼容的 <code>/audio/transcriptions</code>，整理用 DeepSeek 的 <code>/chat/completions</code>。</p>
-
-    <p class="group-label">语音识别</p>
-    <label>接口地址<input id="cfgBaseUrl" placeholder="https://api.siliconflow.cn/v1" /></label>
-    <label>模型<input id="cfgModel" placeholder="Qwen/Qwen3-ASR-1.7B" /></label>
-    <label>API Key<input id="cfgKey" type="password" placeholder="留空表示不修改" autocomplete="off" /></label>
-    <div class="row">
-          <label class="check"><input type="checkbox" id="optKeepAudio" /><span>保留录音片段（默认转完即删，不占空间）</span></label>
-      <label class="check"><input type="checkbox" id="optBubbleSound" /><span>机器人冒话时的提示音</span></label>
-      <label>最长一句（秒）<input id="cfgSeg" type="number" min="5" max="60" step="1" /></label>
-      <label>语言<input id="cfgLang" placeholder="zh" /></label>
+  <div class="modal-card cfg-card">
+    <div class="cfg-head">
+      <div>
+        <h2>接口设置</h2>
+        <p class="cfg-sub">识别走 <code>/audio/transcriptions</code>，整理走 <code>/chat/completions</code></p>
+      </div>
+      <button class="cfg-close" id="btnCfgClose" aria-label="关闭">×</button>
     </div>
-    <label>识别提示词<input id="cfgPrompt" placeholder="以下是大学课堂的中文讲解……" /></label>
 
-    <p class="group-label">笔记整理（DeepSeek）</p>
-    <label>接口地址<input id="cfgNotesUrl" placeholder="https://api.deepseek.com" /></label>
-    <label>模型<input id="cfgNotesModel" placeholder="deepseek-flash" /></label>
-    <label>API Key<input id="cfgNotesKey" type="password" placeholder="留空表示不修改" autocomplete="off" /></label>
-    <label>落盘位置（Obsidian 收件箱）<input id="cfgInbox" placeholder="D:\Obsidian\00-收件箱" /></label>
+    <div class="cfg-body">
+      <section class="cfg-sec">
+        <div class="cfg-sec-head">
+          <span class="cfg-dot"></span>
+          <b>语音识别</b>
+          <span class="cfg-sec-note">硅基流动等 OpenAI 兼容接口</span>
+        </div>
 
-    <div class="modal-actions">
-      <button class="ghost" id="btnCancel">取消</button>
-      <button class="btn-primary" id="btnSaveCfg">保存</button>
+        <label class="cfg-field">接口地址
+          <input id="cfgBaseUrl" placeholder="https://api.siliconflow.cn/v1" />
+        </label>
+        <label class="cfg-field">模型
+          <input id="cfgModel" placeholder="Qwen/Qwen3-ASR-1.7B" />
+        </label>
+        <label class="cfg-field">API Key
+          <input id="cfgKey" type="password" placeholder="留空表示不修改" autocomplete="off" />
+        </label>
+
+        <div class="cfg-grid2">
+          <label class="cfg-field">最长一句（秒）
+            <input id="cfgSeg" type="number" min="5" max="60" step="1" />
+          </label>
+          <label class="cfg-field">语言
+            <input id="cfgLang" placeholder="zh" />
+          </label>
+        </div>
+
+        <label class="cfg-field">识别提示词
+          <input id="cfgPrompt" placeholder="以下是大学课堂的中文讲解……" />
+        </label>
+
+        <div class="cfg-switches">
+          <label class="cfg-switch">
+            <input type="checkbox" id="optKeepAudio" />
+            <span class="cfg-track" aria-hidden="true"></span>
+            <span class="cfg-sw-text">保留录音片段<i>默认转完即删，不占空间</i></span>
+          </label>
+          <label class="cfg-switch">
+            <input type="checkbox" id="optBubbleSound" />
+            <span class="cfg-track" aria-hidden="true"></span>
+            <span class="cfg-sw-text">机器人提示音<i>它冒话时响一下</i></span>
+          </label>
+        </div>
+      </section>
+
+      <section class="cfg-sec">
+        <div class="cfg-sec-head">
+          <span class="cfg-dot notes"></span>
+          <b>笔记整理</b>
+          <span class="cfg-sec-note">DeepSeek</span>
+        </div>
+
+        <label class="cfg-field">接口地址
+          <input id="cfgNotesUrl" placeholder="https://api.deepseek.com" />
+        </label>
+        <label class="cfg-field">模型
+          <input id="cfgNotesModel" placeholder="deepseek-flash" />
+        </label>
+        <label class="cfg-field">API Key
+          <input id="cfgNotesKey" type="password" placeholder="留空表示不修改" autocomplete="off" />
+        </label>
+        <label class="cfg-field">落盘位置（Obsidian 收件箱）
+          <input id="cfgInbox" placeholder="D:\Obsidian\00-收件箱" />
+        </label>
+      </section>
+    </div>
+
+    <div class="cfg-foot">
+      <span class="cfg-foot-note">改动只保存在这台电脑</span>
+      <div class="cfg-acts">
+        <button class="ghost" id="btnCancel">取消</button>
+        <button class="btn-primary" id="btnSaveCfg">保存</button>
+      </div>
     </div>
   </div>
 </div>
