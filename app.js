@@ -3504,6 +3504,15 @@
     if (camCountEl) camCountEl.textContent = `${shots.length} 张`;
   }
 
+  function camSetEmpty(title, sub) {
+    const box = $('camEmpty');
+    if (!box) return;
+    const b = box.querySelector('b');
+    const sp = box.querySelector('.cp-empty-sub');
+    if (b && title != null) b.textContent = title;
+    if (sp && sub != null) sp.textContent = sub;
+  }
+
   function showCamHint(text) {
     const empty = $('camEmpty');
     if (text) {
@@ -3864,6 +3873,8 @@
       showCamHint('这个浏览器拿不到摄像头');
       return;
     }
+    camSetEmpty('正在打开摄像头…', '第一次会弹权限提示，允许一下就好');
+    if ($('camEmpty')) $('camEmpty').classList.remove('hidden');
     try {
       camStream = await navigator.mediaDevices.getUserMedia({
         // 用 1080p 起，放大取景时才有像素余量
@@ -3877,10 +3888,12 @@
       }
       if (camShotBtn) camShotBtn.disabled = false;
       if (camOpenBtn) camOpenBtn.textContent = '重连摄像头';
+      camSetEmpty('摄像头还没打开', '点下面的「打开摄像头」，画面会出现在这里');
       showCamHint('');
       if (camRestoreView()) camApplyTransform();
       else camResetView();
     } catch (err) {
+      camSetEmpty('摄像头还没打开', '点下面的「打开摄像头」，画面会出现在这里');
       const name = (err && err.name) || '';
       if (name === 'NotAllowedError') showCamHint('摄像头权限被拒绝，点地址栏左边的图标允许一下');
       else if (name === 'NotReadableError' || name === 'TrackStartError') {
