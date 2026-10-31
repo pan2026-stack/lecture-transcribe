@@ -3511,6 +3511,43 @@
     }
   }
 
+  // ---------------- 外观：深色 / 浅色 ----------------
+  const THEME_KEY = 'lecture-transcribe:theme';
+
+  function currentTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  }
+
+  function applyTheme(theme, remember) {
+    if (theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+    else document.documentElement.removeAttribute('data-theme');
+    if (remember) {
+      try { localStorage.setItem(THEME_KEY, theme); } catch (_) {}
+    }
+    const ic = $('themeIc');
+    const label = $('themeLabel');
+    // 按钮显示「点一下会变成什么」，一眼知道下一步
+    if (ic) ic.textContent = currentTheme() === 'dark' ? '☀' : '☾';
+    if (label) label.textContent = currentTheme() === 'dark' ? '浅色' : '深色';
+  }
+
+  function toggleTheme() {
+    applyTheme(currentTheme() === 'dark' ? 'light' : 'dark', true);
+  }
+
+  if ($('btnTheme')) $('btnTheme').addEventListener('click', toggleTheme);
+  applyTheme(currentTheme(), false);
+
+  // 系统主题变了，且用户没手动选过，就跟着变
+  try {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', (e) => {
+      let saved = null;
+      try { saved = localStorage.getItem(THEME_KEY); } catch (_) {}
+      if (!saved) applyTheme(e.matches ? 'dark' : 'light', false);
+    });
+  } catch (_) {}
+
   // ---------------- 拍板书：缩放 / 取景 ----------------
   const ZOOM_STEPS = [1, 1.5, 2, 3];          // 再大就糊了，最多 3 倍
   let camZoom = 1;          // 当前倍率

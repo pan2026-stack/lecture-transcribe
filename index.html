@@ -5,6 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>课堂转写</title>
 <link rel="icon" href="app.ico" />
+    <script>
+    // 主题在首屏绘制前定下来，避免闪一下白色
+    (function () {
+      try {
+        var saved = localStorage.getItem('lecture-transcribe:theme');
+        var dark = saved ? saved === 'dark'
+          : window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+      } catch (e) {}
+    })();
+    </script>
     <link rel="stylesheet" href="style.css" />
 </head>
 <body class="is-idle">
@@ -36,6 +47,7 @@
     <div class="spacer"></div>
     <button class="tab" id="btnCamera"><span class="ic">◎</span>拍板书</button>
     <button class="tab" id="btnSettings"><span class="ic">⚙</span>设置</button>
+    <button class="tab" id="btnTheme" aria-label="切换深色/浅色"><span class="ic" id="themeIc">☾</span><span id="themeLabel">深色</span></button>
   </nav>
 
   <div class="body">
