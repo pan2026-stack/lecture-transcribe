@@ -2891,3 +2891,18 @@ html[data-theme="dark"] * { scrollbar-color: rgba(255, 255, 255, .18) transparen
 /* logo 在原主题里被新拟物层盖成浅色底，白图标看不见了 —— 这里补回对比 */
 .rail .logo svg { fill: var(--khaki) !important; }
 html[data-theme="dark"] .rail .logo svg { fill: #8ec7e8 !important; }
+
+
+/* 圈选过程中贴在框右下角的倍率 */
+.camera-panel .cp-select-zoom {
+  position: absolute;
+  right: -1px; bottom: -24px;
+  padding: 2px 7px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: #12202c;
+  background: rgba(255, 255, 255, .94);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .28);
+  white-space: nowrap;
+}

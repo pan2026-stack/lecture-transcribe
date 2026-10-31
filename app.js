@@ -3571,6 +3571,32 @@
     camCy = Math.min(1 - half, Math.max(half, camCy));
   }
 
+  const CAM_VIEW_KEY = 'lecture-transcribe:cameraView';
+
+  function camSaveView() {
+    try {
+      localStorage.setItem(CAM_VIEW_KEY, JSON.stringify({
+        zoom: camZoom, cx: camCx, cy: camCy,
+      }));
+    } catch (_) {}
+  }
+
+  function camRestoreView() {
+    try {
+      const raw = localStorage.getItem(CAM_VIEW_KEY);
+      if (!raw) return false;
+      const v = JSON.parse(raw);
+      const z = Number(v.zoom);
+      if (!isFinite(z) || z <= 1.001) return false;
+      camZoom = Math.min(3, Math.max(1, z));
+      camCx = Math.min(1, Math.max(0, Number(v.cx) || 0.5));
+      camCy = Math.min(1, Math.max(0, Number(v.cy) || 0.5));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function camApplyTransform() {
     if (!camVideo) return;
     camZoom = Math.min(3, Math.max(1, camZoom));
@@ -3579,6 +3605,7 @@
     const ty = -(camCy * camZoom - 0.5) * 100;
     camVideo.style.transform = `translate(${tx}%, ${ty}%) scale(${camZoom})`;
     if ($('camZoomVal')) $('camZoomVal').textContent = Math.round(camZoom * 100) + '%';
+    if (camStream) camSaveView();
   }
 
   function camSetZoom(next) {
@@ -3590,11 +3617,14 @@
     camApplyTransform();
   }
 
-  function camResetView() {
+  function camResetView(remember) {
     camZoom = 1;
     camCx = 0.5;
     camCy = 0.5;
     camApplyTransform();
+    if (remember === false) {
+      try { localStorage.removeItem(CAM_VIEW_KEY); } catch (_) {}
+    }
   }
 
   // 在预览上拖一个框 → 只看这块（框按 16:9 约束，和画面同比例）
@@ -3674,6 +3704,16 @@
       const x2 = startX + Math.sign(x - startX || 1) * w;
       const y2 = startY + Math.sign(y - startY || 1) * h;
       drawBox(startX, startY, x2, y2);
+
+      // 实时算一下这一框会放大到多少（换算到视频像素，和松手后的逻辑一致）
+      const vwNow = camVideo.videoWidth || 1920;
+      const a1 = stageToVideo(Math.min(startX, x2), Math.min(startY, y2), rect);
+      const b1 = stageToVideo(Math.max(startX, x2), Math.max(startY, y2), rect);
+      const wPx = Math.max(1, b1.x - a1.x);
+      const predicted = Math.min(3, Math.max(1, vwNow / wPx));
+      const badge = $('camSelectZoom');
+      if (badge) badge.textContent = '×' + predicted.toFixed(1);
+      if ($('camZoomVal')) $('camZoomVal').textContent = Math.round(predicted * 100) + '%';
     });
 
     const finish = (e) => {
@@ -3684,6 +3724,7 @@
       const boxRect = box.getBoundingClientRect();
       hideBox();
       if (!rect.width || !boxRect.width || boxRect.width < rect.width * 0.06) {
+        if ($('camZoomVal')) $('camZoomVal').textContent = Math.round(camZoom * 100) + '%';
         return;                       // 框太小，当作误触
       }
       const a = stageToVideo(boxRect.left - rect.left, boxRect.top - rect.top, rect);
@@ -3695,6 +3736,7 @@
       // 最小框 = 画面 1/3 宽，对应最大 3 倍；再小就糊成一片
       const minSelW = vw / 3;
       if (selW < minSelW - 1) {
+        if ($('camZoomVal')) $('camZoomVal').textContent = Math.round(camZoom * 100) + '%';
         camFlashNote('框太小了，至少圈到画面的三分之一');
         return;
       }
@@ -3714,11 +3756,11 @@
       camSetZoom(e.deltaY < 0 ? 1 : -1);
     }, { passive: false });
 
-    stage.addEventListener('dblclick', () => camResetView());
+    stage.addEventListener('dblclick', () => camResetView(false));
 
     if ($('camZoomIn')) $('camZoomIn').addEventListener('click', () => camSetZoom(1));
     if ($('camZoomOut')) $('camZoomOut').addEventListener('click', () => camSetZoom(-1));
-    if ($('camZoomReset')) $('camZoomReset').addEventListener('click', () => camResetView());
+    if ($('camZoomReset')) $('camZoomReset').addEventListener('click', () => camResetView(false));
   })();
 
   function resetShots() {
@@ -3826,7 +3868,8 @@
       if (camShotBtn) camShotBtn.disabled = false;
       if (camOpenBtn) camOpenBtn.textContent = '重连摄像头';
       showCamHint('');
-      camResetView();
+      if (camRestoreView()) camApplyTransform();
+      else camResetView();
     } catch (err) {
       const name = (err && err.name) || '';
       if (name === 'NotAllowedError') showCamHint('摄像头权限被拒绝，点地址栏左边的图标允许一下');
