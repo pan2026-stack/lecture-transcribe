@@ -3476,3 +3476,29 @@ html[data-theme="dark"] .notes-card .notes-nav a:hover { background: rgba(88, 16
 html[data-theme="dark"] .jobs-panel .hist-chip.on,
 html[data-theme="dark"] .nm-head .tabs .tab.active { box-shadow: 0 1px 2px rgba(0, 0, 0, .4); }
 html[data-theme="dark"] .jobs-panel .file-row .fk.k笔记 { color: #8fd9b2; }
+
+
+/* 转写行前的说话人标签 */
+.seg .spk {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  margin-bottom: 3px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: .02em;
+  color: var(--khaki);
+  background: var(--khaki-dim);
+}
+.seg .spk[data-spk="2"] { color: var(--green); background: rgba(47, 125, 85, .12); }
+.seg .spk[data-spk="3"] { color: #a1662f; background: rgba(193, 146, 74, .16); }
+.seg .spk[data-spk="4"] { color: #7a5aa8; background: rgba(122, 90, 168, .14); }
+.seg .spk[data-spk="5"] { color: #b0567a; background: rgba(176, 86, 122, .14); }
+
+html[data-theme="dark"] .seg .spk { color: #8ec7e8; background: rgba(88, 169, 214, .16); }
+html[data-theme="dark"] .seg .spk[data-spk="2"] { color: #8fd9b2; background: rgba(108, 197, 154, .16); }
+html[data-theme="dark"] .seg .spk[data-spk="3"] { color: #e6bd8d; background: rgba(224, 176, 122, .16); }
+html[data-theme="dark"] .seg .spk[data-spk="4"] { color: #c0a8ea; background: rgba(160, 130, 220, .18); }
+html[data-theme="dark"] .seg .spk[data-spk="5"] { color: #e6a0bd; background: rgba(214, 120, 156, .18); }

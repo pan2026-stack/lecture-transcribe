@@ -247,7 +247,7 @@
       }
       segments.push({
         seq: item.seq || 0, time: item.time, text: item.text || '', tr: item.tr || '',
-        trEl: node.tr, translated: !!item.tr, trDir: 'restored',
+        trEl: node.tr, spkEl: node.spk, translated: !!item.tr, trDir: 'restored',
       });
       maxSeq = Math.max(maxSeq, item.seq || 0);
     });
@@ -1125,10 +1125,11 @@
     row.className = 'seg';
     row.dataset.time = time;
     row.innerHTML = `<div class="t">${time}</div>`
-      + '<div class="body"><div class="x pending">识别中…</div><div class="tr hidden"></div></div>';
+      + '<div class="body"><span class="spk hidden"></span>'
+      + '<div class="x pending">识别中…</div><div class="tr hidden"></div></div>';
     elTranscript.appendChild(row);
     if (followTail) scrollToBottom();
-    return { row, x: row.querySelector('.x'), tr: row.querySelector('.tr') };
+    return { row, x: row.querySelector('.x'), tr: row.querySelector('.tr'), spk: row.querySelector('.spk') };
   }
 
   // 连续的空段落折叠成一行，稿子不被「（本段没听到内容）」刷屏
@@ -1219,6 +1220,46 @@
     }
   }
 
+  // ---------------- 声纹：发言人一 / 二 / 三 ----------------
+  const CN_NUM = '一二三四五六七八九十';
+  let spkLabels = {};
+  let spkTimer = null;
+
+  function spkName(n) {
+    const i = Number(n);
+    if (!i) return '';
+    if (i <= 10) return '发言人' + CN_NUM[i - 1];
+    return '发言人' + i;
+  }
+
+  function paintSpeakers() {
+    segments.forEach((rec) => {
+      const n = spkLabels[String(rec.seq)];
+      if (!n || !rec.spkEl) return;
+      rec.spkEl.textContent = spkName(n);
+      rec.spkEl.dataset.spk = String(Math.min(5, n));
+      rec.spkEl.classList.remove('hidden');
+    });
+  }
+
+  async function refreshSpeakers() {
+    if (!sessionId) return;
+    try {
+      const res = await fetch('/api/diarize?session=' + encodeURIComponent(sessionId));
+      if (!res.ok) return;
+      const data = await res.json();
+      // 只有一个人说话时标出来反而吵，两个人以上才显示
+      if (!data || data.count < 2) return;
+      spkLabels = data.labels || {};
+      paintSpeakers();
+    } catch (_) {}
+  }
+
+  function scheduleSpeakers() {
+    clearTimeout(spkTimer);
+    spkTimer = setTimeout(refreshSpeakers, 1200);
+  }
+
   // 写文字时保住语气表情：直接 textContent= 会把 span.tone 一起冲掉
   function setRowText(rowEl, text) {
     if (!rowEl) return;
@@ -1232,7 +1273,7 @@
     const rowEl = node.x;
     // 转写区可能已经被清空（例如点「结束并保存」后），那时候只收数据、不碰 DOM
     const alive = () => !!(node && node.row && node.row.isConnected);
-    const rec = { seq, time: timeLabel, text: '', tr: '', trEl: node.tr, translated: false };
+    const rec = { seq, time: timeLabel, text: '', tr: '', trEl: node.tr, spkEl: node.spk, translated: false };
     try {
       const data = await postWav(blob);
       const text = (data.text || '').trim();
@@ -1248,6 +1289,7 @@
     }
       rec.text = text;
       segments.push(rec);
+      scheduleSpeakers();
       if (running && Math.random() < 0.12) flashEmotion('10', '16', 1600);
       persistSession();
       syncNotesButton();
@@ -4592,6 +4634,29 @@
 
   const heroDate = $('heroDate');
   if (heroDate) heroDate.textContent = new Date().toLocaleDateString('zh-CN');
+  // 演示：?spkdemo=1 造三段不同说话人的内容，用来检查标签样式
+  if (location.search.includes('spkdemo=1')) {
+    setTimeout(() => {
+      const demo = [
+        ['00:00', '好，我们上课。今天讲二叉树的中序遍历。', 1],
+        ['00:07', '老师，中序遍历和层序遍历有什么区别？', 2],
+        ['00:14', '中序遍历是按左、根、右的顺序走，层序是按层走。', 1],
+        ['00:22', '那二叉搜索树的中序遍历是不是一定递增？', 2],
+      ];
+      demo.forEach(([t, x, n], i) => {
+        const node = addSegmentRow(t);
+        node.x.classList.remove('pending');
+        node.x.textContent = x;
+        segments.push({
+          seq: i + 1, time: t, text: x, tr: '', trEl: node.tr, spkEl: node.spk, translated: false,
+        });
+      });
+      spkLabels = { 1: 1, 2: 2, 3: 1, 4: 2 };
+      paintSpeakers();
+      updateStats();
+    }, 500);
+  }
+
   // 自测：?selftest=stop 直接造几段内容并跑完「结束」全流程
   if (location.search.includes('selftest=race')) {
     setTimeout(() => {
