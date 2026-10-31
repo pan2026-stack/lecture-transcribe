@@ -1004,14 +1004,14 @@ _PROXY_ALIVE = {"at": 0.0, "ok": False}
 def _win_proxy_settings() -> tuple[bool, str]:
     """读注册表里的系统代理开关与地址（不依赖 urllib 的缓存）"""
     try:
-        import winreg
+        import winreg          # 只有 Windows 有；macOS / Linux 直接当作没开代理
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
         enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
         server, _ = winreg.QueryValueEx(key, "ProxyServer")
         return bool(enable), str(server or "")
-    except OSError:
+    except (OSError, ImportError):
         return False, ""
 
 
