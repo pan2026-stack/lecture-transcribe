@@ -15,8 +15,16 @@ echo.
 
 if not exist "%APP%\server.py" goto :nodir
 
-rem 优先用安装包自带的 python：系统里那个 python 可能只是微软商店的占位程序，
-rem 一运行就退出 9009，看起来像程序坏了。
+rem ---------- 1) 找浏览器：用 App 模式开窗口，没有地址栏和标签页 ----------
+set "BROWSER="
+for %%b in (
+  "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
+  "%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
+  "%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+  "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+) do if not defined BROWSER if exist "%%~b" set "BROWSER=%%~b"
+
+rem ---------- 2) 找 python：优先安装包自带的 ----------
 set "PY="
 set "PYARGS="
 if exist "%APP%\python\python.exe" set "PY=%APP%\python\python.exe"
@@ -25,6 +33,7 @@ if not defined PY where py >nul 2>nul && set "PY=py" & set "PYARGS=-3"
 if not defined PY goto :nopy
 echo %PY% | find /i "WindowsApps" >nul && goto :nopy
 
+rem ---------- 3) 已经在跑就直接开窗口 ----------
 powershell -NoProfile -ExecutionPolicy Bypass -Command "if(Test-NetConnection 127.0.0.1 -Port %PORT% -InformationLevel Quiet -WarningAction SilentlyContinue){exit 0}else{exit 1}"
 if errorlevel 1 goto :notrunning
 
@@ -32,24 +41,24 @@ if /i "%~1"=="dry" (
     echo   [dry] 端口 %PORT% 已被占用，服务已在运行
     goto :end
 )
-echo   服务已经在运行，正在打开网页...
-start "" "%URL%"
+echo   服务已经在运行，正在打开窗口...
+call :openapp
 echo.
 echo   想重启就先关掉那个还在跑的服务窗口，或运行「停止服务.bat」。
 goto :end
 
 :notrunning
 if /i "%~1"=="dry" (
-    echo   [dry] 检查通过：Python=%PY%，端口空闲
+    echo   [dry] 检查通过：Python=%PY%，浏览器=%BROWSER%，端口空闲
     goto :end
 )
 
 :run
-echo   启动中，2 秒后自动打开浏览器...
+echo   启动中，2 秒后自动打开窗口...
 echo   地址：%URL%
 echo   （这个窗口别关，关了就等于停止服务）
 echo.
-start "" /min powershell -NoProfile -Command "Start-Sleep -Seconds 2; Start-Process '%URL%'"
+start "" /min powershell -NoProfile -Command "Start-Sleep -Seconds 2; if ('%BROWSER%' -ne '') { Start-Process '%BROWSER%' -ArgumentList '--app=%URL%','--window-size=1440,900' } else { Start-Process '%URL%' }"
 cd /d "%APP%"
 "%PY%" %PYARGS% server.py
 set "CODE=%ERRORLEVEL%"
@@ -73,6 +82,14 @@ echo.
 choice /c RQ /n /m "   按 R 重新启动，按 Q 退出："
 if errorlevel 2 goto :end
 goto :run
+
+:openapp
+if defined BROWSER (
+    start "" "%BROWSER%" --app="%URL%" --window-size=1440,900
+) else (
+    start "" "%URL%"
+)
+exit /b
 
 :stopped
 echo   服务已停止。
