@@ -48,10 +48,9 @@ echo   想重启就先关掉那个还在跑的服务窗口，或运行「停止�
 goto :end
 
 :notrunning
-if /i "%~1"=="dry" (
-    echo   [dry] 检查通过：Python=%PY%，浏览器=%BROWSER%，端口空闲
-    goto :end
-)
+if /i "%~1"=="dry" goto :dryfree
+
+:run
 
 :run
 echo   启动中，2 秒后自动打开窗口...
@@ -106,6 +105,13 @@ echo   [错误] 找不到可用的 Python。
 echo   这个安装包应该自带 python，请检查安装目录下有没有：
 echo   %APP%\python\python.exe
 echo   没有的话多半是被杀毒软件删了，重新安装一次即可。
+goto :end
+
+:dryfree
+echo   [dry] 检查通过
+echo   [dry] Python=%PY%
+echo   [dry] 浏览器=%BROWSER%
+echo   [dry] 端口空闲
 goto :end
 
 :end

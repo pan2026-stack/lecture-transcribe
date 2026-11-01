@@ -4,7 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>课堂转写</title>
-<link rel="icon" href="app.ico" />
+<!-- 换了 app.ico 就把 v 改大（用日期），否则 Edge 会一直拿缓存的旧图标，任务栏图标不刷新 -->
+<link rel="icon" type="image/x-icon" href="app.ico?v=20261101" />
     <script>
     // 主题在首屏绘制前定下来，避免闪一下白色
     (function () {
@@ -53,6 +54,8 @@
   <div class="body">
 
     <div class="banner hidden" id="banner"></div>
+
+    <button class="key-tip hidden" id="keyTip" type="button"></button>
 
   <div class="camera-panel hidden" id="cameraPanel">
     <div class="cp-head">
@@ -117,6 +120,7 @@
               <span class="jp-dot" id="jobsDot"></span>
               <b id="jobsCount">没有正在处理的任务</b>
               <div class="jobs-list" id="jobsList"></div>
+              <button class="jp-mini-btn" id="btnJobsHistory" type="button">历史</button>
             </div>
 
             <div class="jp-body">
@@ -231,47 +235,129 @@
 <!-- 课程名 -->
 <div class="modal-layer hidden" id="courseModal">
   <div class="modal-box course-box">
-    <h2 class="modal-title">这次听什么课？</h2>
-    <p class="modal-hint">填完点开始，转写稿、讲稿、笔记的文件名里都会带上它</p>
+    <div class="cfg-head">
+      <div>
+        <h2 class="modal-title">这次听什么课？</h2>
+        <p class="modal-hint">转写稿、讲稿、笔记的文件名里都会带上它</p>
+      </div>
+      <button class="cfg-close" id="btnCourseClose" type="button" aria-label="关闭">×</button>
+    </div>
 
-    <label class="field-label" for="courseInput">课程名</label>
-    <input class="text-input" id="courseInput" maxlength="40" placeholder="例如：法理学 第五讲" />
-    <div class="title-chips" id="courseChips"></div>
+    <div class="course-body">
+      <label class="field-label" for="courseInput">课程名</label>
+      <input class="text-input" id="courseInput" maxlength="40" placeholder="例如：法理学 第五讲" />
+      <div class="title-chips" id="courseChips"></div>
 
-    <div class="name-preview" id="coursePreview"></div>
+      <div class="name-preview" id="coursePreview"></div>
+    </div>
 
-    <div class="modal-acts">
-      <button class="btn btn-ghost" id="btnCourseCancel" type="button">取消</button>
-      <button class="btn btn-primary" id="btnCourseGo" type="button">开始听课</button>
+    <div class="cfg-foot">
+      <span class="cfg-foot-note">留空就用日期当名字</span>
+      <div class="cfg-acts">
+        <button class="ghost" id="btnCourseCancel" type="button">取消</button>
+        <button class="btn-primary" id="btnCourseGo" type="button">开始听课</button>
+      </div>
     </div>
   </div>
 </div>
 
 <!-- 首次设置 -->
 <div class="modal hidden" id="setupModal">
-  <div class="modal-card">
-    <h2>先填两个 KEY 就能用</h2>
-    <p class="hint">识别和整理分别走两家服务，其他参数都已预置好，填完这两项即可开始。</p>
-    <label>硅基流动 API Key（语音识别）
-      <input id="setupSfKey" type="password" placeholder="sk-...  在 cloud.siliconflow.cn 申请" autocomplete="off" />
-    </label>
-    <label>DeepSeek API Key（整理讲稿和笔记）
-      <input id="setupDsKey" type="password" placeholder="sk-...  在 platform.deepseek.com 申请" autocomplete="off" />
-    </label>
-    <p class="hint" id="setupHint">两个 KEY 只存在本机 config.json，不会上传到别处。</p>
-    <div class="modal-actions">
-      <button class="ghost" id="btnSetupLater">稍后再说</button>
-      <button class="btn-primary" id="btnSetupSave">保存并开始</button>
+  <div class="modal-card cfg-card setup-card">
+    <div class="cfg-head">
+      <div>
+        <h2>先填两个 KEY</h2>
+        <p class="cfg-sub">只存在这台电脑，不上传</p>
+      </div>
+      <button class="cfg-close" id="btnSetupClose" type="button" aria-label="关闭">×</button>
+    </div>
+
+    <div class="cfg-body">
+      <section class="cfg-sec">
+        <div class="cfg-sec-head">
+          <span class="cfg-dot"></span>
+          <b>语音识别</b>
+          <span class="cfg-sec-note">边听边转</span>
+        </div>
+        <label class="cfg-field">接口地址
+          <input id="setupSfUrl" placeholder="https://api.siliconflow.cn/v1" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="cfg-field">API Key
+          <input id="setupSfKey" type="password" placeholder="sk-..." autocomplete="off" />
+        </label>
+        <p class="cfg-tip">去 <a href="https://siliconflow.cn" target="_blank" rel="noopener">siliconflow.cn</a> 申请，有免费额度</p>
+      </section>
+
+      <section class="cfg-sec">
+        <div class="cfg-sec-head">
+          <span class="cfg-dot"></span>
+          <b>笔记整理</b>
+          <span class="cfg-sec-note">讲稿和笔记</span>
+        </div>
+        <label class="cfg-field">接口地址
+          <input id="setupDsUrl" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="cfg-field">API Key
+          <input id="setupDsKey" type="password" placeholder="sk-..." autocomplete="off" />
+        </label>
+        <p class="cfg-tip">去 <a href="https://platform.deepseek.com" target="_blank" rel="noopener">platform.deepseek.com</a> 申请</p>
+      </section>
+
+      <section class="cfg-sec">
+        <div class="cfg-sec-head">
+          <span class="cfg-dot files"></span>
+          <b>文件存哪儿</b>
+          <span class="cfg-sec-note">之后都能改</span>
+        </div>
+
+        <div class="save-map">
+          <div class="save-row">
+            <span class="save-k">笔记 / 讲稿</span>
+            <span class="save-v"><span id="setupNotesDir">—</span><i class="save-tag" id="setupNotesTag"></i></span>
+          </div>
+          <div class="save-row">
+            <span class="save-k">转写稿 / 断点</span>
+            <span class="save-v" id="setupSessionsDir">—</span>
+          </div>
+          <div class="save-row">
+            <span class="save-k">KEY 和配置</span>
+            <span class="save-v" id="setupConfigPath">—</span>
+          </div>
+        </div>
+
+        <label class="cfg-field">笔记收件箱（可以留空）
+          <input id="setupInbox" placeholder="留空就存本地 sessions/" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="cfg-btnrow">
+          <button class="cfg-mini" id="btnSetupInboxDefault" type="button">用默认位置</button>
+          <button class="cfg-mini" id="btnSetupOpenFolder" type="button">打开这个文件夹</button>
+        </div>
+        <p class="cfg-tip save-note hidden" id="setupSaveNote"></p>
+        <p class="cfg-warn hidden" id="setupDataWarn"></p>
+      </section>
+
+      <p class="hint setup-hint" id="setupHint">KEY 和存储位置之后都能在「设置」里改。</p>
+    </div>
+
+    <div class="cfg-foot">
+      <span class="cfg-foot-note">填完就可以开始听课</span>
+      <div class="cfg-acts">
+        <button class="ghost" id="btnSetupLater" type="button">稍后再说</button>
+        <button class="btn-primary" id="btnSetupSave" type="button">保存并开始</button>
+      </div>
     </div>
   </div>
 </div>
 
 <!-- 历史 -->
 <div class="modal hidden" id="historyModal">
-  <div class="modal-card wide">
-    <div class="notes-head">
-      <h2 id="historyTitle">历史记录</h2>
-      <div class="notes-actions">
+  <div class="modal-card cfg-card hist-card">
+    <div class="cfg-head">
+      <div>
+        <h2 id="historyTitle">历史记录</h2>
+        <p class="cfg-sub">最近存下的笔记、讲稿和转写稿</p>
+      </div>
+      <div class="hist-head-acts">
         <button class="ghost hidden" id="btnRegenNotes">重新生成笔记</button>
         <span class="dl-group hidden" id="dlGroup">
           <button class="ghost" data-dl="docx">Word</button>
@@ -279,10 +365,23 @@
           <button class="ghost" data-dl="html">HTML</button>
         </span>
         <button class="ghost hidden" id="btnHistoryBack">← 列表</button>
-        <button class="ghost" id="btnCloseHistory">关闭</button>
+        <button class="cfg-close" id="btnHistClose" type="button" aria-label="关闭">×</button>
       </div>
     </div>
-    <div class="notes-body" id="historyBody"></div>
+
+    <div class="hist-tools">
+      <input class="hist-search" id="historySearch" placeholder="搜索文件名…" autocomplete="off" spellcheck="false" />
+      <span class="hist-count" id="historyCount"></span>
+    </div>
+
+    <div class="notes-body hist-body" id="historyBody"></div>
+
+    <div class="cfg-foot">
+      <span class="cfg-foot-note">按时间倒序 · 点一行打开</span>
+      <div class="cfg-acts">
+        <button class="ghost" id="btnCloseHistory" type="button">关闭</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -308,7 +407,11 @@
       <div class="notes-body" id="notesBody"></div>
       <aside class="notes-raw" id="notesRaw"></aside>
     </div>
-    <p class="paths" id="notesPath"></p>
+    <p class="paths">
+      <span id="notesPath"></span>
+      <i class="paths-err hidden" id="notesOpenErr"></i>
+      <button class="cfg-mini paths-open hidden" id="btnOpenNotesFolder" type="button">打开所在文件夹</button>
+    </p>
   </div>
 </div>
 
@@ -384,11 +487,37 @@
         <label class="cfg-field">API Key
           <input id="cfgNotesKey" type="password" placeholder="留空表示不修改" autocomplete="off" />
         </label>
-        <label class="cfg-field">落盘位置（Obsidian 收件箱）
-          <input id="cfgInbox" placeholder="D:\Obsidian\00-收件箱" />
-        </label>
+
+        <div class="save-box">
+          <div class="save-map">
+            <div class="save-row">
+              <span class="save-k">笔记 / 讲稿</span>
+              <span class="save-v"><span id="cfgNotesDir">—</span><i class="save-tag" id="cfgNotesTag"></i></span>
+            </div>
+            <div class="save-row">
+              <span class="save-k">转写稿 / 断点</span>
+              <span class="save-v" id="cfgSessionsDir">—</span>
+            </div>
+            <div class="save-row">
+              <span class="save-k">KEY 和配置</span>
+              <span class="save-v" id="cfgConfigPath">—</span>
+            </div>
+          </div>
+
+          <label class="cfg-field">笔记收件箱
+            <input id="cfgInbox" placeholder="留空就存本地 sessions/" autocomplete="off" spellcheck="false" />
+          </label>
+          <div class="cfg-btnrow">
+            <button class="cfg-mini" id="btnCfgInboxDefault" type="button">用默认位置</button>
+            <button class="cfg-mini" id="btnCfgOpenFolder" type="button">打开这个文件夹</button>
+          </div>
+          <p class="cfg-tip save-note hidden" id="cfgSaveNote"></p>
+          <p class="cfg-warn hidden" id="cfgDataWarn"></p>
+        </div>
       </section>
     </div>
+
+    <p class="cfg-errbox hidden" id="cfgSaveErr"></p>
 
     <div class="cfg-foot">
       <span class="cfg-foot-note">改动只保存在这台电脑</span>

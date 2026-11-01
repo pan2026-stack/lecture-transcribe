@@ -55,6 +55,7 @@
   const tabs = Array.from(document.querySelectorAll('.tab'));
   let lastNotes = '', lastArticle = '', currentTab = 'notes';
   let lastNotesPath = '', lastArticlePath = '', historyDocPath = '';
+  let lastNotesDir = '';        // 笔记所在文件夹，「打开所在文件夹」用
   let docText = '', docTitle = '';
   let followTail = true, autoScrolling = false;
 
@@ -106,15 +107,15 @@
 
   // 文件名预览
   function coursePreviewHtml(title) {
-    const name = safeTitle(title) || defaultTitle();
+    const name = escHtml(safeTitle(title) || defaultTitle());
     const d = new Date();
     const ymd = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
     const hm = `${pad2(d.getHours())}${pad2(d.getMinutes())}`;
     const date = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
     return ''
-      + `<div>笔记  <b>课堂笔记</b>-${name}-${date}-${hm}.md</div>`
-      + `<div>讲稿  <b>课堂原文</b>-${name}-${date}-${hm}.md</div>`
-      + `<div>转写稿 ${ymd}-${hm}12-${name}-转写稿.md</div>`;
+      + `<div><span class="np-k">笔记</span>课堂笔记-<b>${name}</b>-${date}-${hm}.md</div>`
+      + `<div><span class="np-k">讲稿</span>课堂原文-<b>${name}</b>-${date}-${hm}.md</div>`
+      + `<div><span class="np-k">转写稿</span>${ymd}-${hm}12-<b>${name}</b>-转写稿.md</div>`;
   }
 
   // ---------- 2) 弹窗 ----------
@@ -154,7 +155,7 @@
 
     const recents = recentTitles();
     input.value = recents[0] || '';
-    chips.innerHTML = recents.map((t) => `<button type="button" class="title-chip">${t}</button>`).join('');
+    chips.innerHTML = recents.map((t) => `<button type="button" class="title-chip">${escHtml(t)}</button>`).join('');
     Array.from(chips.querySelectorAll('.title-chip')).forEach((btn) => {
       btn.addEventListener('click', () => {
         input.value = btn.textContent;
@@ -174,6 +175,9 @@
     const layer = $('courseModal');
     if (layer) layer.classList.add('hidden');
   }
+
+  // 截图 / 自检用：不用真点「开始听课」也能把课程名弹窗摆出来
+  window.__openCourse = openCourseModal;
 
   function confirmCourse() {
     const input = $('courseInput');
@@ -2404,6 +2408,7 @@
     const silent = !!opts.auto;   // 自动整理一律不弹窗：结果去「历史」看
     notesBody.innerHTML = '<p class="empty">正在整理：先顺成一篇完整讲稿，再提取成笔记……长课可能要一两分钟。</p>';
     notesPath.textContent = '';
+    setNotesFolder('');
     if (!silent) { notesModal.classList.remove('hidden'); flashEmotion('39', '02', 2400); }   // 输出回复
 
     btnNotes.disabled = true;
@@ -2447,6 +2452,7 @@
       if (data.article_path) lines.push(`原文：${data.article_path}`);
       notesPath.textContent = (data.where === 'obsidian' ? '' : '（Obsidian 路径不可写，已存本地）\n')
         + lines.join('\n');
+      setNotesFolder(data.notes_path);
       setEmotion('33');
       setTimeout(() => { if (!running) setEmotion('02'); }, 4000);
       if (opts.auto) return data;              // 后台整理：不打断当前界面
@@ -2478,6 +2484,90 @@
 
   // ------------------------------------------------------------ 配置
 
+  // 首次配置向导：这次会话里填过或关过之后，就不再自动弹
+  let setupHandled = false;
+
+  // 落盘位置 / 缺 KEY 提示：都从最近一次配置里取
+  let lastCfg = {};                        // 最近一次 public_config（页面注入也走 applyConfig）
+  const SETUP_SESSION_KEY = 'lecture-transcribe:setupDismissed';
+  let setupDismissed = false;              // 同一浏览器会话里关过向导，刷新后不再自动弹
+  try { setupDismissed = sessionStorage.getItem(SETUP_SESSION_KEY) === '1'; } catch (_) {}
+
+  function missingKeys(cfg) {
+    const out = [];
+    if (!cfg.has_key) out.push('语音识别');
+    if (!cfg.has_notes_key) out.push('笔记整理');
+    return out;
+  }
+
+  // 顶部一行「还差 … 的 KEY」：只缺一个（或向导已关）时出现，点一下去设置
+  function refreshKeyTip() {
+    const tip = $('keyTip');
+    if (!tip) return;
+    const cfg = lastCfg || {};
+    const missing = missingKeys(cfg);
+    const setupEl = $('setupModal');
+    const setupOpen = !!setupEl && !setupEl.classList.contains('hidden');
+    if (!missing.length || setupOpen) {
+      tip.classList.add('hidden');
+      tip.onclick = null;
+      return;
+    }
+    tip.innerHTML = `<span class="kt-text">还差${missing.join('、')}的 KEY，点这里补上</span>`
+      + '<span class="kt-go">去设置 →</span>';
+    tip.classList.remove('hidden');
+    tip.onclick = () => {
+      hideBanner();
+      const target = !cfg.has_key ? 'cfgKey' : 'cfgNotesKey';
+      $('modal').classList.remove('hidden');
+      setTimeout(() => {
+        const el = $(target);
+        if (!el) return;
+        el.focus({ preventScroll: true });
+        if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+      }, 70);
+    };
+  }
+
+  // 落盘位置三行：笔记/讲稿、转写稿、KEY 分别在哪
+  function fillSaveMap(prefix, cfg) {
+    const put = (id, text) => { const el = $(id); if (el) el.textContent = text || '—'; };
+    put(prefix + 'NotesDir', cfg.notes_dir);
+    put(prefix + 'SessionsDir', cfg.sessions_dir);
+    put(prefix + 'ConfigPath', cfg.config_path);
+    const tag = $(prefix + 'NotesTag');
+    if (tag) {
+      const obsidian = cfg.notes_dir_source === 'obsidian';
+      tag.textContent = obsidian ? 'Obsidian 收件箱' : '本地 sessions';
+      tag.className = 'save-tag' + (obsidian ? '' : ' fallback');
+    }
+    setSaveWarn(prefix + 'DataWarn', cfg);
+  }
+
+  function setSaveWarn(id, cfg) {
+    const el = $(id);
+    if (!el) return;
+    const lines = [];
+    let level = '';
+    if (cfg.data_writable === false) {
+      level = 'err';
+      lines.push(`当前目录写不进去，KEY 存不下来：${cfg.data_fallback_reason || cfg.data_dir || ''}`);
+    } else if (cfg.data_fallback) {
+      lines.push(`程序目录不可写，数据已自动存到 ${cfg.data_dir || ''}`);
+    }
+    if (cfg.obsidian_inbox && cfg.obsidian_ok === false) {
+      if (!level) level = 'warn';
+      lines.push(`这个收件箱路径不存在，笔记现在会存到 ${cfg.notes_fallback_dir || cfg.sessions_dir || ''}`);
+    }
+    if (!lines.length) {
+      el.className = 'cfg-warn hidden';
+      el.textContent = '';
+      return;
+    }
+    el.className = 'cfg-warn' + (level ? ' ' + level : '');
+    el.textContent = lines.join('\n');
+  }
+
   // 把服务端给的配置贴到界面上（页面注入和 /api/config 两条路共用）
   function applyConfig(cfg) {
     segSeconds = Number(cfg.segment_seconds) || 6;
@@ -2506,13 +2596,33 @@
     $('cfgNotesKey').placeholder = cfg.has_notes_key
       ? `已设置 ${cfg.notes_key_hint}（留空表示不修改）`
       : 'sk-...（留空表示不修改）';
-    // 首次运行：缺任一 KEY 就直接弹向导，不让用户去猜「设置在哪」
+    // 落盘位置 / 缺 KEY 提示都从这里取
+    lastCfg = cfg;
+    fillSaveMap('setup', cfg);
+    fillSaveMap('cfg', cfg);
+    // 向导里的接口地址 / 收件箱：跟着配置走，用户改过就不覆盖
+    const sfUrlEl = $('setupSfUrl');
+    if (sfUrlEl && !sfUrlEl.value) sfUrlEl.value = cfg.base_url || '';
+    const dsUrlEl = $('setupDsUrl');
+    if (dsUrlEl && !dsUrlEl.value) dsUrlEl.value = cfg.notes_base_url || '';
+    const setupInbox = $('setupInbox');
+    if (setupInbox) {
+      if (!setupInbox.dataset.touched) setupInbox.value = cfg.obsidian_inbox || '';
+      setupInbox.placeholder = cfg.default_inbox
+        ? '例如 ' + cfg.default_inbox
+        : '留空就存本地 sessions/';
+    }
+    // 首次运行：用后端算好的 setup_required（只有两个 KEY 都没有才是 true）
     const setupModal = $('setupModal');
-    if (setupModal && (!cfg.has_key || !cfg.has_notes_key)) {
-      $('setupSfKey').placeholder = cfg.has_key ? '已配置，留空表示不改' : 'sk-...  在 cloud.siliconflow.cn 申请';
-      $('setupDsKey').placeholder = cfg.has_notes_key ? '已配置，留空表示不改' : 'sk-...  在 platform.deepseek.com 申请';
+    const needSetup = (typeof cfg.setup_required === 'boolean')
+      ? cfg.setup_required
+      : (!cfg.has_key && !cfg.has_notes_key);
+    if (setupModal && !setupHandled && !setupDismissed && needSetup) {
+      $('setupSfKey').placeholder = cfg.has_key ? '已配置，留空表示不改' : 'sk-...';
+      $('setupDsKey').placeholder = cfg.has_notes_key ? '已配置，留空表示不改' : 'sk-...';
       setupModal.classList.remove('hidden');
     }
+    refreshKeyTip();
   }
 
   let configFailures = 0;
@@ -2564,6 +2674,96 @@
     }
   }
 
+  // 让后端在资源管理器里打开一个文件夹（不要用 file:// 链接，Chromium 下点了没反应）
+  async function openFolder(path) {
+    try {
+      const res = await fetch('/api/open-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: String(path || ''), create: true }),
+      });
+      const r = await res.json().catch(() => ({}));
+      if (!res.ok || r.error) return { ok: false, msg: r.hint || r.error || ('HTTP ' + res.status) };
+      return { ok: true, path: r.path || path };
+    } catch (err) {
+      return { ok: false, msg: '打开文件夹失败：' + err.message };
+    }
+  }
+
+  // 设置弹窗里的保存错误：贴在弹窗内、页脚上方，别让 banner 被弹层挡住
+  function setCfgSaveErr(msg) {
+    const el = $('cfgSaveErr');
+    if (!el) return;
+    if (!msg) {
+      el.textContent = '';
+      el.classList.add('hidden');
+      return;
+    }
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  }
+
+  // 笔记弹窗底部：记住所在文件夹，露出/收起「打开所在文件夹」
+  function setNotesFolder(path) {
+    const p = String(path || lastNotesPath || '');
+    lastNotesDir = p.replace(/[\\/][^\\/]+$/, '');
+    const btn = $('btnOpenNotesFolder');
+    if (btn) btn.classList.toggle('hidden', !lastNotesDir);
+    const err = $('notesOpenErr');
+    if (err) {
+      err.textContent = '';
+      err.classList.add('hidden');
+    }
+  }
+
+  function inboxHint(which, msg) {
+    const el = $(which === 'setup' ? 'setupSaveNote' : 'cfgSaveNote');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.classList.toggle('hidden', !msg);
+  }
+
+  // 「用默认位置」= 把建议目录填进输入框（点保存才生效）；「打开这个文件夹」= POST /api/open-folder
+  function bindInboxTools(which) {
+    const setup = which === 'setup';
+    const input = $(setup ? 'setupInbox' : 'cfgInbox');
+    const btnDefault = $(setup ? 'btnSetupInboxDefault' : 'btnCfgInboxDefault');
+    const btnOpen = $(setup ? 'btnSetupOpenFolder' : 'btnCfgOpenFolder');
+    const saveLabel = setup ? '保存并开始' : '保存';
+
+    if (input) {
+      input.addEventListener('input', () => {
+        input.dataset.touched = '1';
+        inboxHint(which, '');
+      });
+    }
+
+    if (btnDefault) {
+      btnDefault.addEventListener('click', () => {
+        const p = (lastCfg && lastCfg.default_inbox) || '';
+        if (!input || !p) return;
+        input.value = p;
+        input.dataset.touched = '1';
+        input.focus();
+        inboxHint(which, `已填好建议位置，点「${saveLabel}」后生效`);
+      });
+    }
+
+    if (btnOpen) {
+      btnOpen.addEventListener('click', async () => {
+        const p = input ? input.value.trim() : '';
+        const r = await openFolder(p);
+        if (r.ok) {
+          inboxHint(which, `已打开 ${r.path}`);
+          if (!setup) setCfgSaveErr('');
+          return;
+        }
+        if (setup) setSetupHint(r.msg, true);
+        else setCfgSaveErr(r.msg);
+      });
+    }
+  }
+
   async function saveConfig() {
     const body = {
       base_url: $('cfgBaseUrl').value,
@@ -2573,19 +2773,30 @@
       prompt: $('cfgPrompt').value,
       notes_base_url: $('cfgNotesUrl').value,
       notes_model: $('cfgNotesModel').value,
-      obsidian_inbox: $('cfgInbox').value,
+      obsidian_inbox: $('cfgInbox').value.trim(),   // 空串 = 清空收件箱，笔记回到 sessions/
     };
     const key = $('cfgKey').value.trim();
     if (key) body.api_key = key;
     const nkey = $('cfgNotesKey').value.trim();
     if (nkey) body.notes_api_key = nkey;
-    const res = await fetch('/api/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const cfg = await res.json();
-    if (cfg.error) { showBanner(cfg.error); return; }
+    let res;
+    try {
+      res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      setCfgSaveErr('保存失败：' + err.message);
+      return;
+    }
+    const cfg = await res.json().catch(() => ({}));
+    if (!res.ok || cfg.error) {
+      // 500 带 error + hint：先读 body 再看 res.ok，别让 hint 被吞掉
+      setCfgSaveErr([cfg.error || ('HTTP ' + res.status), cfg.hint].filter(Boolean).join('\n'));
+      return;                                   // 没写盘就别关窗口
+    }
+    setCfgSaveErr('');
     $('cfgKey').value = '';
     $('cfgNotesKey').value = '';
     $('modal').classList.add('hidden');
@@ -3358,33 +3569,69 @@
   const historyTitle = $('historyTitle');
   const btnHistoryBack = $('btnHistoryBack');
 
+  let historyItems = [];
+  let historyQuery = '';
+
+  function historyTime(mtime) {
+    const d = new Date(mtime * 1000);
+    const p2 = (n) => String(n).padStart(2, '0');
+    return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  }
+
+  function historyRowHtml(it) {
+    const kind = String(it.kind || '');
+    return `<button class="hist-row" type="button" data-path="${encodeURIComponent(it.path)}">`
+      + `<span class="hist-name">${escHtml(it.name)}</span>`
+      + `<span class="hist-meta"><span class="hist-kind k${escHtml(kind)}">${escHtml(kind)}</span>`
+      + `<span class="hist-time">${historyTime(it.mtime)}</span></span></button>`;
+  }
+
+  function renderHistory() {
+    if (!historyBody) return;
+    const q = historyQuery.trim().toLowerCase();
+    const rows = historyItems.filter((it) => !q || String(it.name || '').toLowerCase().includes(q));
+    const count = $('historyCount');
+    if (count) {
+      count.textContent = q
+        ? `匹配 ${rows.length} / ${historyItems.length}`
+        : (historyItems.length ? `共 ${historyItems.length} 个` : '');
+    }
+    if (!rows.length) {
+      historyBody.innerHTML = historyItems.length
+        ? '<div class="hist-empty"><span class="hist-empty-ic" aria-hidden="true">⌕</span>'
+          + '<b>没有匹配的</b><span>换个词试试，或者清空搜索框</span></div>'
+        : '<div class="hist-empty"><span class="hist-empty-ic" aria-hidden="true">▤</span>'
+          + '<b>还没有记录</b><span>听完一节、点「结束并保存」后，转写稿、讲稿和笔记都会出现在这里</span></div>';
+      return;
+    }
+    historyBody.innerHTML = rows.map(historyRowHtml).join('');
+  }
+
   async function openHistory() {
     const dl = $('dlGroup');
     if (dl) dl.classList.add('hidden');
     historyModal.classList.remove('hidden');
-    btnHistoryBack.classList.add('hidden');
-    historyTitle.textContent = '历史记录';
+    if (btnHistoryBack) btnHistoryBack.classList.add('hidden');
+    if (historyTitle) historyTitle.textContent = '历史记录';
+    historyQuery = '';
+    const search = $('historySearch');
+    if (search) search.value = '';
     historyBody.innerHTML = '<p class="empty">加载中…</p>';
     try {
       const res = await fetch('/api/history');
       const data = await res.json();
-      const items = data.items || [];
-      if (!items.length) {
-        historyBody.innerHTML = '<p class="empty">还没有记录。听完一节、点「结束并保存」后，转写稿、讲稿和笔记都会出现在这里。</p>';
-        return;
-      }
-      historyBody.innerHTML = items.map((it) => {
-        const d = new Date(it.mtime * 1000);
-        const when = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-        return `<button class="hist-row" data-path="${encodeURIComponent(it.path)}">`
-          + `<span class="hist-time">${when}</span>`
-          + `<span class="hist-kind">${it.kind}</span>`
-          + `<span class="hist-name">${it.name}</span></button>`;
-      }).join('');
+      historyItems = data.items || [];
+      renderHistory();
     } catch (err) {
-      historyBody.innerHTML = `<p class="empty">读不到历史：${err.message}</p>`;
+      const count = $('historyCount');
+      if (count) count.textContent = '';
+      historyBody.innerHTML = '<div class="hist-empty"><span class="hist-empty-ic" aria-hidden="true">!</span>'
+        + `<b>读不到历史</b><span>${escHtml(err.message)}</span></div>`;
     }
   }
+
+  // 截图 / 自检用：没有菜单入口时也能把历史弹窗打开
+  window.__openHistory = openHistory;
 
   let regenSource = '';       // 'doc' = 当前文档就是转写稿；否则是转写稿路径
 
@@ -4459,37 +4706,96 @@
   if (elConnAsr) elConnAsr.addEventListener('click', checkHealth);
   if (elConnNotes) elConnNotes.addEventListener('click', checkHealth);
 
+  // ---------------- 首次配置向导 ----------------
+  const SETUP_HINT = 'KEY 和存储位置之后都能在「设置」里改。';
+
+  function fieldValue(id) {
+    const el = $(id);
+    return el ? String(el.value || '').trim() : '';
+  }
+
+  function setSetupHint(msg, isError) {
+    const hint = $('setupHint');
+    if (!hint) return;
+    hint.textContent = msg;
+    hint.classList.toggle('err', !!isError);
+  }
+
+  function dismissSetup() {
+    setupHandled = true;          // 关过一次就不再自动弹，别挡住主界面
+    setupDismissed = true;        // 同一浏览器会话里记住（刷新不再弹，但没配好的人下次还会被提醒）
+    try { sessionStorage.setItem(SETUP_SESSION_KEY, '1'); } catch (_) {}
+    const box = $('setupModal');
+    if (box) box.classList.add('hidden');
+    setSetupHint(SETUP_HINT, false);
+    refreshKeyTip();              // 关掉向导后，顶部补一行「还差 … 的 KEY」
+  }
+
   const setupSave = $('btnSetupSave');
   if (setupSave) {
     setupSave.addEventListener('click', async () => {
-      const sf = $('setupSfKey').value.trim();
-      const ds = $('setupDsKey').value.trim();
-      if (!sf && !ds) { $('setupHint').textContent = '两个都空着，先至少填一个吧。'; return; }
+      const sf = fieldValue('setupSfKey');
+      const ds = fieldValue('setupDsKey');
+      if (!sf && !ds) { setSetupHint('两个都空着，先至少填一个吧。', true); return; }
       const body = {};
       if (sf) body.api_key = sf;
       if (ds) body.notes_api_key = ds;
+      const sfUrl = fieldValue('setupSfUrl');
+      const dsUrl = fieldValue('setupDsUrl');
+      if (sfUrl) body.base_url = sfUrl;
+      if (dsUrl) body.notes_base_url = dsUrl;
+      // 收件箱：只有用户真动过才传（空串 = 清空收件箱，别误清）
+      const inboxEl = $('setupInbox');
+      if (inboxEl && inboxEl.dataset.touched) body.obsidian_inbox = inboxEl.value.trim();
       try {
         const res = await fetch('/api/config', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
         });
-        const cfg = await res.json();
-        if (cfg.error) throw new Error(cfg.error);
+        const cfg = await res.json().catch(() => ({}));
+        if (!res.ok || cfg.error) {
+          // 500 的 body 里有 error + hint，两段都原样贴出来
+          setSetupHint([cfg.error || ('HTTP ' + res.status), cfg.hint].filter(Boolean).join('\n'), true);
+          return;
+        }
         $('setupSfKey').value = '';
         $('setupDsKey').value = '';
+        if (inboxEl) inboxEl.dataset.touched = '';
+        setupHandled = true;      // 只填了一个也别再把窗口弹回来
         $('setupModal').classList.add('hidden');
+        setSetupHint(SETUP_HINT, false);
         await loadConfig();
         checkHealth();
         hideBanner();
         elFoot.textContent = 'KEY 已保存，正在检测连接…';
       } catch (err) {
-        $('setupHint').textContent = '保存失败：' + err.message;
+        setSetupHint('保存失败：' + err.message, true);
       }
     });
   }
   const setupLater = $('btnSetupLater');
-  if (setupLater) setupLater.addEventListener('click', () => $('setupModal').classList.add('hidden'));
+  if (setupLater) setupLater.addEventListener('click', dismissSetup);
+  const setupClose = $('btnSetupClose');
+  if (setupClose) setupClose.addEventListener('click', dismissSetup);
+  // 两个落盘位置区块（向导 + 设置）的「用默认位置 / 打开这个文件夹」
+  bindInboxTools('setup');
+  bindInboxTools('cfg');
+  // 笔记弹窗：打开笔记所在文件夹
+  const openNotesFolderBtn = $('btnOpenNotesFolder');
+  if (openNotesFolderBtn) {
+    openNotesFolderBtn.addEventListener('click', async () => {
+      const r = await openFolder(lastNotesDir);
+      const err = $('notesOpenErr');
+      if (!err) return;
+      err.textContent = r.ok ? '' : r.msg;
+      err.classList.toggle('hidden', !!r.ok);
+    });
+  }
 
-  btnSettings.addEventListener('click', () => $('modal').classList.remove('hidden'));
+  btnSettings.addEventListener('click', () => {
+    setCfgSaveErr('');
+    inboxHint('cfg', '');
+    $('modal').classList.remove('hidden');
+  });
   $('btnCancel').addEventListener('click', () => $('modal').classList.add('hidden'));
   if ($('btnCfgClose')) $('btnCfgClose').addEventListener('click', () => $('modal').classList.add('hidden'));
   document.addEventListener('keydown', (e) => {
@@ -4651,12 +4957,38 @@
   if (histBtn) histBtn.addEventListener('click', openHistory);
   const histClose = $('btnCloseHistory');
   if (histClose) histClose.addEventListener('click', () => historyModal.classList.add('hidden'));
+  const histCloseX = $('btnHistClose');
+  if (histCloseX) histCloseX.addEventListener('click', () => historyModal.classList.add('hidden'));
   if (btnHistoryBack) btnHistoryBack.addEventListener('click', openHistory);
+  const jobsHistBtn = $('btnJobsHistory');
+  if (jobsHistBtn) jobsHistBtn.addEventListener('click', () => openHistory());
+  const histSearch = $('historySearch');
+  if (histSearch) {
+    histSearch.addEventListener('input', () => {
+      historyQuery = histSearch.value;
+      renderHistory();
+    });
+  }
   historyBody.addEventListener('click', (e) => {
     const row = e.target.closest('.hist-row');
-    if (row) openDoc(decodeURIComponent(row.dataset.path));
+    if (!row) return;
+    historyModal.classList.add('hidden');      // 文档在处理页里打开，弹窗让开
+    openDoc(decodeURIComponent(row.dataset.path));
   });
   historyModal.addEventListener('click', (e) => { if (e.target === historyModal) historyModal.classList.add('hidden'); });
+
+  // 课程名弹窗的 × 和 Esc，等于「取消」
+  const courseCloseX = $('btnCourseClose');
+  if (courseCloseX) courseCloseX.addEventListener('click', closeCourseModal);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const c = $('courseModal');
+    if (c && !c.classList.contains('hidden')) closeCourseModal();
+    const s = $('setupModal');
+    if (s && !s.classList.contains('hidden')) dismissSetup();
+    const h = $('historyModal');
+    if (h && !h.classList.contains('hidden')) h.classList.add('hidden');
+  });
 
   $('btnCloseNotes').addEventListener('click', () => notesModal.classList.add('hidden'));
   document.addEventListener('keydown', (e) => {

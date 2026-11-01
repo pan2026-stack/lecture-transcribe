@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import ssl
+import subprocess
 import sys
 import logging
 import socket
@@ -42,6 +43,45 @@ else:
 LOGS = BASE / "logs"
 LOG = logging.getLogger("lecture")
 
+# 程序所在目录不一定可写：装进 C:\Program Files、放在只读共享盘、或者直接在
+# 压缩包里运行，都会让 config.json 写不进去，用户看到的就是「KEY 存不住」。
+# 启动时真写一个临时文件探测；不可写就整体落到用户目录，并把实际路径通过
+# /api/config 的 data_dir / data_writable / data_fallback 告诉前端。
+PROGRAM_DATA = DATA
+FALLBACK_DATA = Path(
+    os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+) / "LectureTranscribe" / "data"
+
+
+def _writable(path: Path) -> bool:
+    """真写一个临时文件试一下；os.access 在 Windows 上并不可靠"""
+    probe = None
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".write-probe-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        probe.write_text("ok", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+    finally:
+        if probe is not None:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
+
+
+DATA_FALLBACK_ACTIVE = False
+DATA_FALLBACK_REASON = ""
+if not _writable(DATA):
+    if _writable(FALLBACK_DATA):
+        DATA_FALLBACK_ACTIVE = True
+        DATA_FALLBACK_REASON = f"程序目录没有写权限：{DATA}"
+        print(f"[data] 程序目录不可写，数据改存：{FALLBACK_DATA}", file=sys.stderr, flush=True)
+        DATA = FALLBACK_DATA
+    else:
+        DATA_FALLBACK_REASON = f"程序目录和备用目录都写不进去：{DATA} / {FALLBACK_DATA}"
+
 CONFIG_PATH = DATA / "config.json"
 SESSIONS = DATA / "sessions"
 AUDIO_DIR = SESSIONS / "_audio"
@@ -52,7 +92,8 @@ def _read_version() -> str:
     head = BASE / "VERSION"
     try:
         if head.is_file():
-            return head.read_text(encoding="utf-8").strip() or "0.0.0"
+            # utf-8-sig：VERSION 文件带 BOM 时别把 \ufeff 显示到页脚
+            return head.read_text(encoding="utf-8-sig").strip() or "0.0.0"
     except OSError:
         pass
     return "0.0.0"
@@ -195,11 +236,87 @@ def split_parts(text: str) -> tuple[str, str]:
 
 # ---------------------------------------------------------------- 配置
 
+class ConfigWriteError(RuntimeError):
+    """config.json 写不进去：带上可操作的提示和真实路径，别只抛一个 500"""
+
+    def __init__(self, reason: str, hint: str):
+        super().__init__(reason)
+        self.reason = reason
+        self.hint = hint
+
+    def payload(self) -> dict:
+        return {
+            "ok": False,
+            "error": f"配置没保存成功：{self.reason}",
+            "hint": self.hint,
+            "config_path": str(CONFIG_PATH),
+            "data_dir": str(DATA),
+            "data_writable": _writable(DATA),
+        }
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """先写临时文件再 os.replace：写一半断电也不会留下坏掉的 config.json"""
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _migrate_config() -> None:
+    """数据目录在「程序目录」和「用户目录」之间切换时，把旧 config.json 带过来。
+
+    只在新位置还没有配置时做一次，免得用户重新填 KEY。
+    """
+    if CONFIG_PATH.exists():
+        return
+    candidates = [PROGRAM_DATA / "config.json", FALLBACK_DATA / "config.json"]
+    candidates = [p for p in candidates if p != CONFIG_PATH and p.is_file()]
+    if not candidates:
+        return
+    try:
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        _atomic_write_text(CONFIG_PATH, newest.read_text(encoding="utf-8-sig"))
+        print(f"[data] 已把配置从 {newest.parent} 迁到 {DATA}", flush=True)
+    except OSError as exc:
+        print(f"[warn] 迁移旧配置失败：{exc}", file=sys.stderr)
+
+
+def _config_error_reason(exc: OSError) -> str:
+    detail = getattr(exc, "strerror", "") or str(exc)
+    return f"{detail}（{CONFIG_PATH}）"
+
+
+def _config_error_hint(exc: OSError) -> str:
+    if isinstance(exc, PermissionError) and CONFIG_PATH.exists():
+        return (
+            "config.json 写不进去：文件可能是只读的、被杀毒软件锁住了，"
+            f"或当前用户对 {DATA} 没有写权限。请右键 config.json → 属性 → 取消「只读」；"
+            "还不行就把整个程序文件夹移到「桌面 / 文档 / D 盘」这类可写位置再运行。"
+        )
+    return (
+        f"程序所在文件夹没有写权限（{DATA}），config.json 存不下来。"
+        "请把整个程序文件夹移到「桌面 / 文档 / D 盘」这类可写位置再运行，"
+        "不要放在 C:\\Program Files、只读共享盘，也不要直接在压缩包里运行；"
+        "或者右键程序 →「以管理员身份运行」后再保存一次。"
+    )
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_PATH.exists():
         try:
-            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+            # utf-8-sig：记事本另存为「带 BOM 的 UTF-8」时也能读，不会因此丢 KEY
+            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig")))
         except Exception as exc:  # 配置坏了也要能启动
             print(f"[warn] config.json 解析失败，使用默认值: {exc}", file=sys.stderr)
     return cfg
@@ -207,9 +324,10 @@ def load_config() -> dict:
 
 def save_config(data: dict) -> dict:
     cfg = load_config()
-    # 这些字段留空表示「不修改」：前端万一没加载完就保存，也不会把配置清空
+    # 这些字段留空表示「不修改」：前端万一没加载完就保存，也不会把配置清空。
+    # 收件箱不在此列：留空 = 清掉收件箱，笔记改回 sessions/（前端要能重置落盘位置）
     MUST_HAVE = {
-        "base_url", "model", "notes_base_url", "notes_model", "obsidian_inbox",
+        "base_url", "model", "notes_base_url", "notes_model",
     }
     for key in (
         "base_url", "model", "api_key", "language", "prompt",
@@ -225,15 +343,33 @@ def save_config(data: dict) -> dict:
             cfg["segment_seconds"] = max(2, min(30, int(data["segment_seconds"])))
         except (TypeError, ValueError):
             pass
-    CONFIG_PATH.write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    try:
+        _atomic_write_text(CONFIG_PATH, json.dumps(cfg, ensure_ascii=False, indent=2))
+    except OSError as exc:
+        raise ConfigWriteError(_config_error_reason(exc), _config_error_hint(exc)) from exc
     return cfg
+
+
+def _default_inbox() -> Path:
+    """建议的默认落盘目录：文档\\课堂转写（只在用户点「打开/创建」时才建）"""
+    return Path.home() / "Documents" / "课堂转写"
+
+
+def _notes_target(cfg: dict) -> tuple[Path, str]:
+    """笔记实际会落到哪：收件箱配了且目录存在就写收件箱，否则退回 sessions/"""
+    inbox = (cfg.get("obsidian_inbox") or "").strip()
+    if inbox:
+        p = Path(inbox).expanduser()
+        if p.is_dir():
+            return p, "obsidian"
+    return SESSIONS, "sessions"
 
 
 def public_config(cfg: dict) -> dict:
     key = cfg.get("api_key") or ""
     nkey = cfg.get("notes_api_key") or ""
+    inbox = (cfg.get("obsidian_inbox") or "").strip()
+    notes_dir, notes_source = _notes_target(cfg)
     return {
         "base_url": cfg["base_url"],
         "model": cfg["model"],
@@ -246,12 +382,55 @@ def public_config(cfg: dict) -> dict:
         "notes_model": cfg.get("notes_model", ""),
         "has_notes_key": bool(nkey),
         "notes_key_hint": f"****{nkey[-4:]}" if len(nkey) >= 8 else ("已设置" if nkey else ""),
-        "obsidian_inbox": cfg.get("obsidian_inbox", ""),
+        "obsidian_inbox": inbox,
         "keep_audio": bool(cfg.get("keep_audio")),
-        "obsidian_ok": Path(cfg.get("obsidian_inbox") or ".").is_dir() if cfg.get("obsidian_inbox") else False,
+        "obsidian_ok": bool(inbox) and Path(inbox).expanduser().is_dir(),
+        # ---- 落盘位置：前端可以直接告诉用户「文件到底在哪」 ----
+        "data_dir": str(DATA),                 # 实际使用的数据目录
+        "config_path": str(CONFIG_PATH),       # 配置文件的完整路径
+        "data_writable": _writable(DATA),      # 现在还能不能写（现场探测）
+        "data_fallback": DATA_FALLBACK_ACTIVE, # 是否已退回用户目录
+        "data_fallback_reason": DATA_FALLBACK_REASON,
+        "program_dir": str(PROGRAM_DATA),      # 程序/安装目录
+        "sessions_dir": str(SESSIONS),         # 转写稿、讲稿、笔记的兜底目录
+        "notes_dir": str(notes_dir),           # 笔记此刻实际会写进哪
+        "notes_dir_source": notes_source,      # "obsidian" 或 "sessions"
+        "notes_fallback_dir": str(SESSIONS),   # 收件箱没配/不存在时的落点
+        "default_inbox": str(_default_inbox()),# 建议给用户填的默认收件箱
+        # ---- 首次配置：两个 KEY 都没有才该自动弹向导 ----
+        "setup_required": not key and not nkey,
         "version": _read_version(),   # 每次现读，改了 VERSION 不用重启
         "build": build_stamp(),
     }
+
+
+def open_folder(raw_path: str = "", create: bool = False) -> dict:
+    """在资源管理器里打开一个目录（前端「打开这个文件夹」按钮用）。
+
+    raw_path 为空时打开「笔记实际落盘目录」；目录不存在且 create=True 时创建。
+    """
+    if raw_path:
+        cleaned = raw_path.strip().strip('"').strip("'")
+        path = Path(os.path.expandvars(os.path.expanduser(cleaned)))
+        if not path.is_absolute():
+            raise ValueError("请给绝对路径，例如 D:\\知识库\\00-收件箱")
+    else:
+        # 不传 path：打开「笔记此刻实际落盘」的目录（没有收件箱就是 sessions/）
+        path = _notes_target(load_config())[0]
+        create = True
+    created = False
+    if not path.is_dir():
+        if not create:
+            raise FileNotFoundError(str(path))
+        path.mkdir(parents=True, exist_ok=True)
+        created = True
+    if os.name == "nt":
+        os.startfile(str(path))          # noqa: S606 - 本地工具，打开资源管理器
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+    return {"ok": True, "path": str(path), "created": created}
 
 
 # ---------------------------------------------------------------- 转写
@@ -2330,8 +2509,32 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/config":
             try:
                 return self._json(200, public_config(save_config(json.loads(body or b"{}"))))
+            except ConfigWriteError as exc:
+                # 写不进去是环境问题：把 hint 和真实路径一起给前端，别只丢个 errno
+                return self._json(500, exc.payload())
             except Exception as exc:
                 return self._json(400, {"error": f"保存配置失败：{exc}"})
+
+        if route == "/api/open-folder":
+            try:
+                payload = json.loads(body or b"{}")
+                if not isinstance(payload, dict):
+                    payload = {}
+                return self._json(200, open_folder(
+                    str(payload.get("path") or ""), bool(payload.get("create"))))
+            except ValueError as exc:
+                return self._json(400, {"error": str(exc),
+                                        "hint": "路径要写成 D:\\知识库\\00-收件箱 这样的绝对路径。"})
+            except FileNotFoundError as exc:
+                return self._json(404, {
+                    "error": f"文件夹不存在：{exc}",
+                    "hint": "先保存一份笔记会自动建；或带 \"create\": true 让服务端创建。",
+                })
+            except OSError as exc:
+                return self._json(500, {
+                    "error": f"打开文件夹失败：{exc}",
+                    "hint": "可以直接复制 path 到资源管理器地址栏打开。",
+                })
 
         if route == "/api/transcribe":
             lang = "zh"
@@ -2483,9 +2686,13 @@ def main():
     global ALLOW_REMOTE
     ALLOW_REMOTE = args.host not in ("127.0.0.1", "localhost", "::1")
 
+    _migrate_config()                 # 换过数据目录就把旧 config.json 带过来，别让用户重填 KEY
     cfg = load_config()
     if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            _atomic_write_text(CONFIG_PATH, json.dumps(cfg, ensure_ascii=False, indent=2))
+        except OSError as exc:       # 连备用目录都不可写：先起来，保存时再给明确提示
+            print(f"[warn] config.json 写不进去（{CONFIG_PATH}）：{exc}", file=sys.stderr)
 
     install_api_opener()
 
@@ -2499,6 +2706,9 @@ def main():
     if swept:
         print(f"清理了 {swept} 个未转写的历史音频片段")
     print(f"课堂实时转写已启动： http://{args.host}:{args.port}")
+    print(f"数据目录：{DATA}")
+    if DATA_FALLBACK_ACTIVE:
+        print(f"  （程序目录不可写，已自动改存这里；原因：{DATA_FALLBACK_REASON}）")
     print(f"配置：{CONFIG_PATH}")
     if not cfg.get("api_key"):
         print("提示：还没有 API Key，页面右上角「设置」里填。")

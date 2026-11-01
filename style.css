@@ -280,12 +280,13 @@ body.is-idle #footInfo { visibility: hidden; }
 .tx-mode {
   font-size: 11px;
   color: #a1662f;
-  background: #fdf3e7;
-  border: 1px solid #f0d9bd;
+  background: rgba(193, 146, 74, .12);
+  border: 1px solid rgba(193, 146, 74, .3);
   border-radius: 999px;
   padding: 1px 8px;
   margin-left: 8px;
 }
+html[data-theme="dark"] .tx-mode { color: #e6bd8d; border-color: rgba(224, 176, 122, .3); }
 .transcript-wrap.restored .seg .x { color: var(--muted); }
 .tx-tools { display: flex; align-items: center; gap: 8px; }
 .tx-tools .switch,
@@ -416,8 +417,8 @@ body.is-idle #footInfo { visibility: hidden; }
 .hist-chip.on { background: var(--khaki); border-color: var(--khaki); color: #fff; }
 .hist-search {
   margin-left: auto; width: 180px; height: 30px;
-  border: 1px solid var(--line); border-radius: 8px;
-  padding: 0 10px; font: 12px/1 inherit; color: var(--ink); background: #fff;
+  border: 1px solid var(--line); border-radius: 9px;
+  padding: 0 10px; font: 12px/1 inherit; color: var(--ink); background: var(--bg-deep);
 }
 .hist-search:focus { outline: none; box-shadow: 0 0 0 3px rgba(31, 127, 181, .22); border-color: var(--khaki); }
 
@@ -908,12 +909,12 @@ label input:focus { outline: none; border-color: var(--khaki); }
 .field-label { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 5px; }
 
 .text-input {
-  width: 100%; height: 36px;
-  border: 1px solid var(--line); border-radius: 8px;
+  width: 100%; height: 38px;
+  border: 1px solid var(--line); border-radius: 9px;
   padding: 0 11px;
-  font: 13px/1 inherit; color: var(--ink); background: #fff;
+  font: 13px/1 inherit; color: var(--ink); background: var(--bg-deep);
 }
-.text-input:focus { outline: none; box-shadow: 0 0 0 3px rgba(31, 127, 181, .25); border-color: var(--khaki); }
+.text-input:focus { outline: none; box-shadow: 0 0 0 3px var(--khaki-dim); border-color: var(--khaki); }
 
 .title-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .title-chips:empty { display: none; }
@@ -2320,7 +2321,7 @@ body.hourslow .hour-chip-fly { transition-duration: 1.84s, 1.84s, .9s; }
 
 
 /* 重新生成笔记按钮 */
-#btnRegenNotes { height: 30px; padding: 0 12px; font-size: 12px; border-radius: 10px; }
+#btnRegenNotes { height: 28px; padding: 0 10px; font-size: 11.5px; border-radius: 8px; }
 #btnRegenNotes:disabled { opacity: .6; }
 
 
@@ -3502,3 +3503,385 @@ html[data-theme="dark"] .seg .spk[data-spk="2"] { color: #8fd9b2; background: rg
 html[data-theme="dark"] .seg .spk[data-spk="3"] { color: #e6bd8d; background: rgba(224, 176, 122, .16); }
 html[data-theme="dark"] .seg .spk[data-spk="4"] { color: #c0a8ea; background: rgba(160, 130, 220, .18); }
 html[data-theme="dark"] .seg .spk[data-spk="5"] { color: #e6a0bd; background: rgba(214, 120, 156, .18); }
+
+/* ================================================================
+   首次配置 / 课程名 / 历史：跟设置弹窗、笔记弹窗同一套结构
+   结构 = 固定标题栏（标题 + ×） / 可滚动内容 / 固定页脚
+   ================================================================ */
+
+/* 弹窗圆角统一到 14px（原来设置弹窗是 16，笔记弹窗是 14） */
+.modal-card.cfg-card,
+.modal-layer .course-box { border-radius: 14px; }
+
+/* ---------- 首次配置 ---------- */
+.modal-card.setup-card { max-width: 500px; }
+.setup-card .cfg-body { padding: 14px 22px 2px; }
+.setup-card .cfg-field + .cfg-field { margin-top: 2px; }
+.cfg-tip {
+  margin: -1px 0 12px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+.cfg-tip a {
+  color: var(--khaki);
+  text-decoration: none;
+  border-bottom: 1px solid var(--khaki-dim);
+}
+.cfg-tip a:hover { border-bottom-color: var(--khaki); }
+
+.setup-hint {
+  margin: 2px 0 10px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+.setup-hint.err { color: var(--red); }
+
+/* ---------- 课程名 ---------- */
+.modal-layer .course-box {
+  width: 420px;
+  max-width: calc(100vw - 40px);
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(20, 30, 45, .28);
+}
+.course-body { padding: 14px 22px 16px; }
+.course-body .field-label { margin-bottom: 6px; }
+.course-body .text-input { height: 38px; }
+.course-body .title-chips { margin-top: 9px; }
+.course-body .name-preview { margin: 14px 0 0; }
+
+.course-box .title-chip {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.course-box .title-chip:hover { color: var(--ink); border-color: var(--khaki); }
+
+.course-box .name-preview {
+  background: var(--bg-deep);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 11px;
+  line-height: 1.9;
+  color: var(--faint);
+}
+.course-box .name-preview .np-k {
+  display: inline-block;
+  width: 44px;
+  color: var(--faint);
+}
+.course-box .name-preview b { color: var(--ink); font-weight: 600; }
+
+html[data-theme="dark"] .course-box { box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
+
+/* ---------- 历史 ---------- */
+.modal-card.hist-card {
+  max-width: 620px;
+  max-height: 80vh;
+}
+.hist-head-acts { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.hist-head-acts .ghost {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+}
+.hist-head-acts .ghost:hover { border-color: var(--khaki); color: var(--khaki); background: var(--panel); }
+.hist-head-acts .dl-group { display: flex; gap: 6px; }
+
+.hist-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 22px 10px;
+}
+.hist-tools .hist-search {
+  flex: 1 1 auto;
+  width: auto;
+  margin: 0;
+  height: 34px;
+  padding: 0 11px;
+  font-size: 12px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--bg-deep);
+  color: var(--ink);
+}
+.hist-tools .hist-search:focus {
+  outline: none;
+  border-color: var(--khaki);
+  box-shadow: 0 0 0 3px var(--khaki-dim);
+}
+.hist-count { flex: 0 0 auto; font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+
+.hist-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 14px 12px 16px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.hist-body .hist-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--ink);
+}
+.hist-body .hist-row:hover { background: rgba(28, 120, 170, .07); }
+.hist-body .hist-row:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--khaki-dim); }
+.hist-body .hist-row .hist-name {
+  display: block;
+  width: 100%;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hist-body .hist-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.hist-body .hist-time { font-variant-numeric: tabular-nums; }
+.hist-body .hist-kind {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 0;
+  color: var(--faint);
+  background: var(--panel-2);
+}
+.hist-body .hist-kind.k笔记 { color: #3f7a55; background: rgba(90, 160, 111, .14); }
+.hist-body .hist-kind.k讲稿 { color: #2f6f92; background: rgba(63, 143, 187, .14); }
+.hist-body .hist-kind.k转写稿 { color: #8a6417; background: rgba(200, 145, 46, .16); }
+
+.hist-body .hist-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 34px 18px 30px;
+  text-align: center;
+  color: var(--faint);
+}
+.hist-body .hist-empty-ic {
+  width: 42px; height: 42px;
+  display: grid; place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-deep);
+  color: var(--faint);
+  font-size: 16px;
+}
+.hist-body .hist-empty b { font-size: 12.5px; font-weight: 500; color: var(--muted); }
+.hist-body .hist-empty span:last-child { font-size: 11px; line-height: 1.65; max-width: 30em; }
+.hist-body .empty { margin: 16px 4px; font-size: 11.5px; color: var(--faint); }
+
+html[data-theme="dark"] .hist-body .hist-row:hover { background: rgba(88, 169, 214, .10); }
+html[data-theme="dark"] .hist-body .hist-kind.k笔记 { color: #8fd9b2; }
+html[data-theme="dark"] .hist-body .hist-kind.k讲稿 { color: #8ec7e8; }
+html[data-theme="dark"] .hist-body .hist-kind.k转写稿 { color: #e6bd8d; }
+
+/* ================================================================
+   处理页顶部「历史」入口 + 深色主按钮对比度
+   ================================================================ */
+
+/* 和 .jp-doc-actions button 同一套小按钮：28px / 11.5px / 9px 描边 */
+.jobs-panel .jp-tasks .jp-mini-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+  height: 28px;
+  padding: 0 11px;
+  font-size: 11.5px;
+  line-height: 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .16s, color .16s;
+}
+.jobs-panel .jp-tasks .jp-mini-btn:hover { border-color: var(--khaki); color: var(--khaki); }
+.jobs-panel .jp-tasks .jp-mini-btn:focus-visible {
+  outline: none;
+  border-color: var(--khaki);
+  box-shadow: 0 0 0 3px var(--khaki-dim);
+}
+
+/* 深色：实心 khaki 按钮（白字）对比度不足，换成深一档的蓝 */
+html[data-theme="dark"] .btn-primary,
+html[data-theme="dark"] .btn-khaki,
+html[data-theme="dark"] .jump-bottom,
+html[data-theme="dark"] .tab-badge,
+html[data-theme="dark"] .jobs-panel .jp-doc-actions button.primary,
+html[data-theme="dark"] .camera-panel .cp-btn.primary { background: #2a6f95; }
+
+html[data-theme="dark"] .btn-primary:hover:not(:disabled),
+html[data-theme="dark"] .btn-khaki:hover:not(:disabled),
+html[data-theme="dark"] .jump-bottom:hover,
+html[data-theme="dark"] .jobs-panel .jp-doc-actions button.primary:hover:not(:disabled) { background: #317faa; }
+
+/* ================================================================
+   首次配置 / 设置：落盘位置展示、「还差 KEY」提示、小按钮
+   ================================================================ */
+
+/* 顶栏提示：缺 KEY 时一行、可点、克制 */
+.key-tip {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .16s, color .16s;
+}
+.key-tip::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--khaki);
+  box-shadow: 0 0 0 3px var(--khaki-dim);
+}
+.key-tip:hover { border-color: var(--khaki); color: var(--ink); }
+.key-tip:focus-visible { outline: none; border-color: var(--khaki); box-shadow: 0 0 0 3px var(--khaki-dim); }
+.key-tip .kt-go { margin-left: 4px; color: var(--khaki); font-size: 11.5px; white-space: nowrap; }
+
+/* 落盘位置：三行「谁存哪」+ 收件箱输入 */
+.save-box { margin: 2px 0 4px; }
+.save-map {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 11px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-deep);
+}
+.save-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.save-k { color: var(--faint); white-space: nowrap; }
+.save-v {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  word-break: break-all;
+}
+.save-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-family: var(--font);
+  font-style: normal;
+  font-size: 10px;
+  color: var(--khaki);
+  background: var(--khaki-dim);
+  white-space: nowrap;
+}
+.save-tag.fallback { color: #8a6d3b; background: rgba(200, 145, 46, .16); }
+html[data-theme="dark"] .save-tag.fallback { color: #e6bd8d; }
+
+/* 字段旁的小按钮：和 .jp-doc-actions button 同一套 28px */
+.cfg-btnrow { display: flex; flex-wrap: wrap; gap: 6px; margin: -1px 0 9px; }
+.cfg-mini {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  line-height: 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .16s, color .16s;
+}
+.cfg-mini:hover { border-color: var(--khaki); color: var(--khaki); }
+.cfg-mini:focus-visible { outline: none; border-color: var(--khaki); box-shadow: 0 0 0 3px var(--khaki-dim); }
+
+/* 提示 / 警告 / 保存错误 */
+.save-note { margin: 0 0 8px; color: var(--khaki); }
+.cfg-warn {
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  line-height: 1.65;
+  color: var(--faint);
+  white-space: pre-line;
+}
+.cfg-warn.warn { color: #8a6d3b; }
+.cfg-warn.err { color: var(--red); }
+html[data-theme="dark"] .cfg-warn.warn { color: #e6bd8d; }
+.cfg-errbox {
+  margin: 0;
+  padding: 9px 22px;
+  border-top: 1px solid var(--rule);
+  background: rgba(192, 80, 63, .07);
+  color: var(--red);
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-line;
+}
+html[data-theme="dark"] .cfg-errbox { background: rgba(224, 128, 112, .10); }
+
+/* 笔记弹窗底部：路径 + 打开文件夹 */
+.notes-card .paths { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.notes-card .paths #notesPath { flex: 1 1 auto; min-width: 0; white-space: pre-line; }
+.notes-card .paths .cfg-mini.paths-open { height: 24px; padding: 0 9px; font-size: 10.5px; }
+.notes-card .paths .paths-err { flex: 0 0 100%; font-size: 10.5px; font-style: normal; color: var(--red); }
+
+/* 多行提示：\n 要真的换行 */
+.banner, .setup-hint { white-space: pre-line; }
+
+/* 第三块（文件存哪儿）的圆点用琥珀色，和转写稿标签一致 */
+.cfg-dot.files { background: #c8912e; box-shadow: 0 0 0 3px rgba(193, 146, 74, .16); }
+html[data-theme="dark"] .cfg-dot.files { background: #e0b07a; box-shadow: 0 0 0 3px rgba(224, 176, 122, .16); }
