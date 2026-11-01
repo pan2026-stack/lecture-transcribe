@@ -1233,12 +1233,25 @@
   }
 
   function paintSpeakers() {
+    // 同一发言人连续说多段时只在第一段标一次，换人才再标
+    let prev = 0;
     segments.forEach((rec) => {
-      const n = spkLabels[String(rec.seq)];
-      if (!n || !rec.spkEl) return;
+      if (!rec.spkEl) return;
+      const text = (rec.text || '').trim();
+      const n = Number(spkLabels[String(rec.seq)]) || 0;
+      if (!n || !text) {
+        // 这段没有声纹或没文字：藏起来，但不打断上一位的连续性
+        rec.spkEl.classList.add('hidden');
+        return;
+      }
+      if (n === prev) {
+        rec.spkEl.classList.add('hidden');
+        return;
+      }
       rec.spkEl.textContent = spkName(n);
       rec.spkEl.dataset.spk = String(Math.min(5, n));
       rec.spkEl.classList.remove('hidden');
+      prev = n;
     });
   }
 
@@ -4656,7 +4669,7 @@
           seq: i + 1, time: t, text: x, tr: '', trEl: node.tr, spkEl: node.spk, translated: false,
         });
       });
-      spkLabels = { 1: 1, 2: 2, 3: 1, 4: 2 };
+      spkLabels = { 1: 1, 2: 1, 3: 2, 4: 2 };
       paintSpeakers();
       updateStats();
     }, 500);

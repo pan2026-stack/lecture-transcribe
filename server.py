@@ -1337,12 +1337,17 @@ def _generate_notes(payload: dict) -> dict:
     has_spk = any(seg.get("spk") for seg in segments)
     if has_spk:
         system_prompt += (
-            "\n\n【说话人】转写稿的行首可能带「发言人一：」这类前缀。"
-            "整理讲稿时要保留该前缀，并让不同发言人各自成段，"
-            "不要把两个人的话合并成一句；章节标题不受影响。"
+            "\n\n【说话人】转写稿里，发言人变化处会带「发言人一：」这类前缀，"
+            "同一人连续说话只在第一段标注。整理讲稿时保留这些前缀，"
+            "不同发言人各自成段，不要把两个人的话合并；没有人名的地方不要自己补。"
         )
 
-    transcript = "\n".join(_seg_line(s) for s in segments)
+    _prev = 0
+    _lines = []
+    for _s in segments:
+        _line, _prev = _seg_line(_s, _prev)
+        _lines.append(_line)
+    transcript = "\n".join(_lines)
     total_chars = len(transcript)
     print(f"[notes] 转写稿 {len(segments)} 段 / {total_chars} 字")
     _progress(job, stage="start", done=0, total=1, text="正在准备")
@@ -1355,8 +1360,9 @@ def _generate_notes(payload: dict) -> dict:
             chapters = []            # [(时间, 标题)]，从 [[05:12]] 标记里抽出来
             chunk_size = int(cfg.get("notes_chunk_chars") or 14000)
             chunks, buf, used = [], [], 0
+            spk_prev = 0
             for seg in segments:
-                line = _seg_line(seg)
+                line, spk_prev = _seg_line(seg, spk_prev)
                 if used + len(line) > chunk_size and buf:
                     chunks.append(buf)
                     buf, used = [], 0
@@ -1377,8 +1383,9 @@ def _generate_notes(payload: dict) -> dict:
                         "要求：每个 `## 小标题` 前面加一个时间标记，写成 `[[05:12]] ## 一、标题`，"
                         "时间取该小节在转写稿里开始的那个时间戳。正文其它地方不要出现时间标记。\n"
                         "只输出整理后的正文，不要写「第一部分」之类的前后缀，不要总结。"
-                        + ("如果某行以「发言人一：」这类前缀开头，整理时保留前缀，"
-                           "不同发言人的话不要合并成一句。\n" if any(x.get("spk") for x in chunk) else "")
+                        + ("行首带「发言人X：」的地方是发言人切换，整理时保留这些前缀，"
+                           "不同发言人的话不要合并；没标的地方是同一人继续说，不要自己补。\n"
+                           if any(x.get("spk") for x in chunk) else "")
                     )},
                     {"role": "user", "content": "\n".join(chunk)},
                 ]
@@ -1964,11 +1971,22 @@ def _spk_name(n) -> str:
     return "发言人" + (_CN_NUM[i - 1] if i <= 10 else str(i))
 
 
-def _seg_line(seg: dict) -> str:
-    """一行转写：[时间] 发言人X：内容（没有声纹时就没有前缀）"""
+def _seg_line(seg: dict, prev_spk=0) -> tuple[str, int]:
+    """一行转写：[时间] 发言人X：内容。
+
+    同一个人连续说多段时只在第一段带前缀（和页面上的显示规则一致）。
+    返回 (这一行, 这一行之后“当前发言人”编号)。
+    """
     label = _spk_name(seg.get("spk"))
+    num = 0
+    try:
+        num = int(seg.get("spk") or 0)
+    except (TypeError, ValueError):
+        num = 0
     text = str(seg.get("text", "")).strip()
-    return f"[{seg.get('time', '--:--')}] {label + '：' if label else ''}{text}"
+    if label and num and num != prev_spk:
+        return f"[{seg.get('time', '--:--')}] {label}：{text}", num
+    return f"[{seg.get('time', '--:--')}] {text}", prev_spk
 
 
 def save_session(payload: dict) -> str:
@@ -1989,16 +2007,25 @@ def save_session(payload: dict) -> str:
         "## 转写原文（带时间戳）",
         "",
     ]
+    prev = 0
     for seg in segments:
-        lines.append(_seg_line(seg))
+        line, prev = _seg_line(seg, prev)
+        lines.append(line)
         tr = str(seg.get("tr", "")).strip()
         if tr:
             lines.append(f"    ↳ {tr}")
     lines += ["", "## 纯文本（便于复制整理）", "", ""]
     plain_bits = []
+    prev = 0
     for seg in segments:
         label = _spk_name(seg.get("spk"))
-        plain_bits.append((label + "：" if label else "") + str(seg.get("text", "")).strip())
+        num = int(seg.get("spk") or 0) if str(seg.get("spk") or 0).isdigit() else 0
+        text = str(seg.get("text", "")).strip()
+        if label and num and num != prev:
+            plain_bits.append(label + "：" + text)
+            prev = num
+        else:
+            plain_bits.append(text)
     lines.append("".join(plain_bits))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
