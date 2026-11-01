@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$target = Join-Path $root '课堂转写.bat'
+$target = Join-Path $root '课堂转写.exe'
 $icon = Join-Path $root 'app.ico'
 
 if (-not (Test-Path $target)) {
@@ -17,7 +17,7 @@ $lnk = $shell.CreateShortcut($lnkPath)
 $lnk.TargetPath = $target
 $lnk.WorkingDirectory = $root
 $lnk.Description = '课堂实时转写：上课点开始，下课自动整理笔记'
-if (Test-Path $icon) { $lnk.IconLocation = "$icon,0" }
+if (Test-Path $icon) { $lnk.IconLocation = "$target,0" }
 $lnk.Save()
 
 Write-Host ""
