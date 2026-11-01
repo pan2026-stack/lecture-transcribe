@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import logging
 import socket
+import atexit
 import tempfile
 import threading
 import time
@@ -42,6 +44,27 @@ else:
     DATA = BASE
 LOGS = BASE / "logs"
 LOG = logging.getLogger("lecture")
+
+# 进程被强杀时不会有任何 Python 异常；开 faulthandler 至少能留下原生崩溃栈。
+# 启动/退出也各记一行，方便判断“服务是死了还是被谁关了”。
+try:
+    _CRASH_LOG = open(LOGS / "crash.log", "a", encoding="utf-8", buffering=1)
+    faulthandler.enable(file=_CRASH_LOG, all_threads=True)
+except OSError:
+    _CRASH_LOG = None
+
+
+def _log_life(event: str) -> None:
+    if _CRASH_LOG is None:
+        return
+    try:
+        _CRASH_LOG.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {event} pid={os.getpid()}\n")
+        _CRASH_LOG.flush()
+    except OSError:
+        pass
+
+
+atexit.register(lambda: _log_life("进程正常退出"))
 
 # 程序所在目录不一定可写：装进 C:\Program Files、放在只读共享盘、或者直接在
 # 压缩包里运行，都会让 config.json 写不进去，用户看到的就是「KEY 存不住」。
@@ -334,7 +357,9 @@ def save_config(data: dict) -> dict:
         "notes_base_url", "notes_model", "notes_api_key", "obsidian_inbox",
     ):
         if key in data and isinstance(data[key], str):
-            val = data[key].strip()
+            # 从聊天窗口粘贴的 KEY 常带零宽空格/全角空格，肉眼看不出来但会让鉴权失败
+            val = data[key].replace("\u200b", "").replace("\u200c", "").replace("\ufeff", "")
+            val = val.replace("\u00a0", " ").strip()
             if not val and key in MUST_HAVE:
                 continue
             cfg[key] = val
@@ -1883,7 +1908,12 @@ def _probe(base_url: str, key: str, timeout: int = 8) -> dict:
         return {"ok": True, "msg": f"已连接（{n} 个模型）", "definitive": False}
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            return {"ok": False, "msg": f"KEY 被拒绝（HTTP {exc.code}）", "definitive": True}
+            return {
+                "ok": False,
+                "msg": (f"KEY 被拒绝（HTTP {exc.code}）：请确认这是对应平台自己的 Key，"
+                        f"没有多余空格，也没把两个 Key 填反；接口地址要和平台一致"),
+                "definitive": True,
+            }
         # 404/429/5xx 多半是网络或频率问题，不算 KEY 坏
         return {"ok": False, "msg": f"接口返回 HTTP {exc.code}", "definitive": False}
     except urllib.error.URLError as exc:
@@ -2261,18 +2291,299 @@ def _is_loopback(addr: str) -> bool:
     return addr.startswith("127.")
 
 
+# ---------------- 生命周期：打开即起、关窗即停 ----------------
+# 用户定下的方案：双击启动 = 起服务；关掉窗口 / 页面点「停止服务」= 全部停掉，
+# 不残留、不需要额外步骤。服务退出前写 logs/stop.flag（守护进程靠它判断
+# 「这次是用户要停，别再拉起」），然后自己 os._exit；flag 由启动脚本清理。
+#
+# 注意「关窗即停」这条路默认是关的（AUTOSTOP=False）。pagehide 会在窗口被遮挡、
+# 最小化、切虚拟桌面、reload 时误报，曾经把正在录课的服务杀掉。要开必须同时过
+# 「hidden 门 + 活跃工作门 + 心跳门」，且宽限 45 秒——见 begin_client_closed_grace。
+# 手动点「停止服务」(/api/shutdown) 不受这些门限制，立即退出。
+PROCESS_STARTED = time.time()
+STOP_FLAG = LOGS / "stop.flag"
+_LIFE_LOCK = threading.Lock()
+_LIFE = {
+    "grace_deadline": 0.0,      # 0 表示当前没有挂起的「关窗宽限」
+    "close_notified_at": 0.0,
+    "exiting": False,
+    "exit_reason": "",
+}
+# 下面几个只给自测调小用；正常运行时就是 45 / 0.5 / 120
+CLOSE_GRACE_SECONDS = float(os.environ.get("LT_CLOSE_GRACE_SECONDS") or 45)
+SHUTDOWN_DELAY_SECONDS = float(os.environ.get("LT_SHUTDOWN_DELAY") or 0.5)
+NOTES_WAIT_SECONDS = float(os.environ.get("LT_NOTES_WAIT_SECONDS") or 120)
+
+# 「关窗自动停」默认关闭：pagehide 在窗口被遮挡、最小化、切虚拟桌面、reload 时都会触发，
+# 单凭它判定「用户关了窗口」会误杀正在录课的服务。只有 LT_AUTOSTOP=1 才启用。
+AUTOSTOP = os.environ.get("LT_AUTOSTOP") == "1"
+# 最近这么多秒内还有转写/存音频/整理请求 → 认为「正在干活」，pagehide 一律忽略。
+ACTIVE_WORK_SECONDS = float(os.environ.get("LT_ACTIVE_WORK_SECONDS") or 120)
+# pagehide 之前这么久以内，页面必须发过请求（心跳）；否则说明不是「刚关窗」。
+HEARTBEAT_SECONDS = float(os.environ.get("LT_HEARTBEAT_SECONDS") or 10)
+
+# 最近一次「真正干活」和「页面还活着」的时间
+LAST_WORK = [0.0]
+LAST_PAGE = [0.0]
+_LOGGED_ONCE = set()
+
+# 「页面还在」的请求：首屏资源 + 页面自己轮询的接口。不能把 /api/ping 算进来——
+# 守护进程每秒探一次活，算进来就变成「永远有页面连接」。
+PAGE_HIT_ROUTES = {
+    "/", "/index.html", "/app.js", "/style.css", "/app.ico",
+    "/favicon.ico", "/manifest.json",
+    "/api/config", "/api/health", "/api/stats", "/api/history",
+    "/api/lifecycle", "/api/notes-progress",
+}
+
+# 这些 POST 代表「真在干活」（录音上传 / 转写 / 整理 / 保存），最近有它就不许自动停。
+WORK_ROUTES = {
+    "/api/segment", "/api/transcribe", "/api/transcribe-file",
+    "/api/notes", "/api/save", "/api/export", "/api/chatter",
+    "/api/translate", "/api/words", "/api/shot",
+}
+
+
+def _log_once(key: str, msg: str) -> None:
+    """同一类事件只记一次日志，别让每次 pagehide 都刷屏。"""
+    if key in _LOGGED_ONCE:
+        return
+    _LOGGED_ONCE.add(key)
+    _log(msg)
+
+
+def stop_flag_exists() -> bool:
+    try:
+        return STOP_FLAG.exists()
+    except OSError:
+        return False
+
+
+def write_stop_flag(source: str, reason: str = "") -> None:
+    """写退出标记：内容带时间、pid、来源，方便事后查这次是谁要停的。"""
+    text = (f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} "
+            f"source={source or 'unknown'} reason={reason or '-'}\n")
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        STOP_FLAG.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        _log(f"[lifecycle] 写 {STOP_FLAG} 失败：{exc}")
+
+
+def notes_busy_count() -> int:
+    """还有几个后台整理任务没结束（NOTES_TASKS 里非 done / error 的）。"""
+    try:
+        with NOTES_LOCK:
+            return sum(1 for t in NOTES_TASKS.values()
+                       if t.get("stage") not in ("done", "error"))
+    except Exception:
+        return 0
+
+
+def _flush_logs() -> None:
+    """os._exit 不会走 atexit / 缓冲刷新，退出前手动 flush 一遍。"""
+    for logger in (LOG, logging.getLogger()):
+        for handler in list(logger.handlers):
+            try:
+                handler.flush()
+            except Exception:
+                pass
+    for stream in (sys.stdout, sys.stderr, _CRASH_LOG):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:
+            pass
+
+
+def _wait_notes_finish(max_seconds: float) -> None:
+    """退出前给后台整理任务留时间，最多 max_seconds 秒；不直接砍掉用户数据。"""
+    busy = notes_busy_count()
+    if not busy:
+        return
+    _log(f"[lifecycle] 还有 {busy} 个后台整理任务在跑，最多等 {max_seconds:.0f} 秒让它跑完")
+    started = time.time()
+    while time.time() - started < max_seconds:
+        time.sleep(0.5)
+        if not notes_busy_count():
+            _log(f"[lifecycle] 后台整理任务已跑完（等了 {time.time() - started:.1f}s）")
+            return
+    _log(f"[lifecycle] 等满 {max_seconds:.0f} 秒仍有 {notes_busy_count()} 个任务没结束，先退出")
+
+
+def _begin_exit(source: str, reason: str, delay: float | None = None) -> bool:
+    """写 stop.flag，并在后台线程里「等一下 → 等后台任务 → flush → os._exit(0)」。
+
+    重复调用只生效一次（守护/页面同时触发时不会互相打架）。
+    """
+    with _LIFE_LOCK:
+        if _LIFE["exiting"]:
+            return False
+        _LIFE["exiting"] = True
+        _LIFE["grace_deadline"] = 0.0
+        _LIFE["exit_reason"] = reason
+    write_stop_flag(source, reason)
+    wait = SHUTDOWN_DELAY_SECONDS if delay is None else float(delay)
+    _log(f"[lifecycle] 准备退出（来源={source}，原因={reason}），{wait:.1f}s 后开始收尾")
+
+    def run() -> None:
+        try:
+            time.sleep(max(0.0, wait))
+            _wait_notes_finish(NOTES_WAIT_SECONDS)
+            _log_life(f"生命周期退出（{source}：{reason}）")
+            _log(f"[lifecycle] 收尾完成，进程退出 pid={os.getpid()}")
+            _flush_logs()
+        except Exception as exc:
+            _log(f"[lifecycle] 退出流程异常：{exc}")
+        finally:
+            os._exit(0)          # 后台线程还挂着也不等了：状态已经落盘
+
+    threading.Thread(target=run, name="lifecycle-exit", daemon=True).start()
+    return True
+
+
+def _grace_worker(deadline: float) -> None:
+    while True:
+        time.sleep(0.2)
+        with _LIFE_LOCK:
+            if _LIFE["exiting"]:
+                return
+            if _LIFE["grace_deadline"] != deadline:
+                return           # 又来了一次 pagehide / 页面回来了：以新状态为准
+            if time.time() >= deadline:
+                _LIFE["grace_deadline"] = 0.0
+                break
+    # 宽限到点：再确认一次这期间真的没人干活
+    now = time.time()
+    if LAST_WORK[0] and now - LAST_WORK[0] < ACTIVE_WORK_SECONDS:
+        _log(f"[lifecycle] 宽限期到了，但最近 {now - LAST_WORK[0]:.0f}s 内还有转写/整理请求，"
+             "取消自动停止")
+        return
+    _begin_exit("page", f"页面隐藏且 {CLOSE_GRACE_SECONDS:.0f} 秒内没有新连接、也没有活跃工作")
+
+
+def begin_client_closed_grace(hidden: bool = False, where: str = "") -> float:
+    """页面 pagehide 时由 sendBeacon 调到这里。
+
+    只有同时满足下面全部条件才起宽限（任何一条不满足就忽略，服务继续跑）：
+      1. LT_AUTOSTOP=1 —— 默认关闭，启动脚本先不启用；
+      2. 前端明确报告页面已经 hidden（visibilityState === 'hidden'）；
+      3. 最近 ACTIVE_WORK_SECONDS 秒内没有转写 / 存音频 / 整理请求（录课中绝不自动停）；
+      4. pagehide 前 HEARTBEAT_SECONDS 秒内页面还发过请求（证明是「刚关窗」而不是假死）。
+    宽限期内任何页面请求都会取消（见 note_page_hit），到点后还会再查一次活跃工作。
+    """
+    if not AUTOSTOP:
+        _log_once("autostop-off",
+                  "[lifecycle] 收到 pagehide，但自动停止未启用（LT_AUTOSTOP=1 才开），忽略")
+        return 0.0
+    if not hidden:
+        _log("[lifecycle] 收到 pagehide，但页面没有报告 hidden 状态，忽略")
+        return 0.0
+    now = time.time()
+    if LAST_WORK[0] and now - LAST_WORK[0] < ACTIVE_WORK_SECONDS:
+        _log(f"[lifecycle] 收到 pagehide，但 {now - LAST_WORK[0]:.0f}s 前还有转写/整理请求"
+             f"（{ACTIVE_WORK_SECONDS:.0f}s 内有活动就忽略），忽略")
+        return 0.0
+    page_age = now - LAST_PAGE[0] if LAST_PAGE[0] else None
+    if page_age is None or page_age > HEARTBEAT_SECONDS:
+        age_text = f"{page_age:.1f}s" if page_age is not None else "从未"
+        _log(f"[lifecycle] 收到 pagehide，但页面已经 {age_text} 没发过请求"
+             f"（心跳阈值 {HEARTBEAT_SECONDS:.0f}s），不像刚关窗，忽略")
+        return 0.0
+    with _LIFE_LOCK:
+        if _LIFE["exiting"]:
+            return 0.0
+        deadline = now + CLOSE_GRACE_SECONDS
+        _LIFE["grace_deadline"] = deadline
+        _LIFE["close_notified_at"] = now
+    _log(f"[lifecycle] 页面报告已关闭（hidden=true），"
+         f"{CLOSE_GRACE_SECONDS:.0f} 秒内没有新页面连接就退出")
+    threading.Thread(target=_grace_worker, args=(deadline,),
+                     name="client-closed-grace", daemon=True).start()
+    return CLOSE_GRACE_SECONDS
+
+
+def note_page_hit(route: str) -> None:
+    """页面发来请求：既证明「页面还活着」，也取消挂起的关窗宽限。"""
+    LAST_PAGE[0] = time.time()
+    with _LIFE_LOCK:
+        if not _LIFE["grace_deadline"]:
+            return
+        _LIFE["grace_deadline"] = 0.0
+    _log(f"[lifecycle] 宽限期内收到页面请求 {route}，取消退出")
+
+
+def lifecycle_snapshot(port: int = 0) -> dict:
+    now = time.time()
+    with _LIFE_LOCK:
+        deadline = _LIFE["grace_deadline"]
+        grace_left = max(0.0, deadline - now) if deadline else 0.0
+        exiting = bool(_LIFE["exiting"])
+        reason = _LIFE["exit_reason"]
+        closed_at = _LIFE["close_notified_at"]
+    return {
+        "managed": True,
+        "stop_flag": stop_flag_exists(),
+        "stop_flag_path": str(STOP_FLAG),
+        "uptime": round(now - PROCESS_STARTED, 1),
+        "pid": os.getpid(),
+        "port": port,
+        "autostop": AUTOSTOP,
+        "grace_seconds": CLOSE_GRACE_SECONDS,
+        "grace_remaining": round(grace_left, 1),
+        "exiting": exiting,
+        "exit_reason": reason,
+        "client_closed_at": round(closed_at, 3) if closed_at else 0,
+        "notes_busy": notes_busy_count(),
+        "notes_wait_seconds": NOTES_WAIT_SECONDS,
+        "active_work_seconds": ACTIVE_WORK_SECONDS,
+        "last_work_age": round(now - LAST_WORK[0], 1) if LAST_WORK[0] else None,
+        "last_page_age": round(now - LAST_PAGE[0], 1) if LAST_PAGE[0] else None,
+        "recording_active": bool(LAST_WORK[0] and now - LAST_WORK[0] < ACTIVE_WORK_SECONDS),
+    }
+
+
 STATIC_ALLOW = {
     "", "/", "/index.html", "/app.js", "/style.css", "/app.ico",
     "/favicon.ico", "/manifest.json", "/robots.txt",
 }
 
 
+def _bind_exclusive(sock) -> None:
+    """Windows 独占绑定：第二个实例绑同一端口必须失败，不能两个进程一起收请求。
+
+    背景：Windows 的 SO_REUSEADDR 语义和 Unix 不同——它允许两个进程绑同一个
+    端口，请求会随机落到不同实例，内存里的任务状态不一致，页面就会「时好时坏」。
+    这里关掉 SO_REUSEADDR，并显式 SO_EXCLUSIVEADDRUSE（WinError 10048 拒绝第二个）。
+    其它平台保持原样（allow_reuse_address=True），不影响 macOS / Linux 的重启。
+    """
+    if os.name != "nt":
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    except OSError:
+        pass
+
+
+def _port_in_use(exc: OSError) -> bool:
+    """这个 bind 失败是不是「端口已经被占了」。
+
+    Windows 上还有个坑：双栈 :: 的占用不会挡住后面绑 127.0.0.1，所以端口被占时
+    绝不能退回 IPv4 再绑一次——那样两个实例会同时活着，IPv4 / IPv6 各收一半请求。
+    """
+    code = getattr(exc, "winerror", None) or getattr(exc, "errno", None) or 0
+    # WSAEACCES / WSAEADDRINUSE / Linux EADDRINUSE / EACCES
+    return code in (10013, 10048, 98, 13)
+
+
 class DualStackServer(ThreadingHTTPServer):
     """同时吃 IPv4 与 IPv6：浏览器把 localhost 解析成 ::1 时也能连上"""
     daemon_threads = True
     address_family = socket.AF_INET6
+    allow_reuse_address = os.name != "nt"   # Windows 上必须关掉，见 _bind_exclusive
 
     def server_bind(self):
+        _bind_exclusive(self.socket)
         try:
             self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         except OSError:
@@ -2285,6 +2596,16 @@ class DualStackServer(ThreadingHTTPServer):
         if ALLOW_REMOTE:
             return True
         return _is_loopback(client_address[0])
+
+
+class ExclusiveServer(ThreadingHTTPServer):
+    """IPv4 兜底（老系统上 IPv6 双栈不可用时用）：同样不允许两个实例共存"""
+    allow_reuse_address = os.name != "nt"
+    daemon_threads = True
+
+    def server_bind(self):
+        _bind_exclusive(self.socket)
+        super().server_bind()
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -2356,9 +2677,16 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         self._log_line(f"GET  {self.path}  from {self.client_address[0]}")
         route = self.path.split("?")[0]
+        # 关窗宽限期里页面又连上来了（刷新 / 重开）→ 取消退出
+        if route in PAGE_HIT_ROUTES:
+            note_page_hit(route)
         if route == "/api/ping":
             # 极轻量：不碰外部接口，只用来判断本地服务是否活着
             return self._json(200, {"ok": True, "pid": os.getpid()})
+
+        if route == "/api/lifecycle":
+            # 给前端显示「服务受谁管理、还剩几秒退出」用
+            return self._json(200, lifecycle_snapshot(int(self.server.server_address[1])))
 
         if route == "/api/watchdog":
             cfg = load_config()
@@ -2471,6 +2799,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(403, {"error": "跨站请求被拒绝"})
         _touch()
         route = self.path.split("?")[0]
+        # 页面还在 + 是否在干活：自动停止的安全门靠这两个时间戳判断
+        if route != "/api/client-closed":
+            note_page_hit(route)
+            if route in WORK_ROUTES:
+                LAST_WORK[0] = time.time()
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -2483,6 +2816,36 @@ class Handler(SimpleHTTPRequestHandler):
             body = self.rfile.read(length) if length else b""
         except Exception:
             return self._json(400, {"error": "读取请求体失败"})
+
+        # ---------- 生命周期：两个新接口（只允许本机）----------
+        if route == "/api/shutdown":
+            # 页面点「停止服务」走这里：写 stop.flag → 回包 → 0.5 秒后退出
+            if not _is_loopback(self.client_address[0]):
+                return self._json(403, {"error": "只允许本机停止服务"})
+            self._json(200, {"ok": True, "pid": os.getpid()})
+            _begin_exit("api", "收到了 /api/shutdown（页面点了停止服务）")
+            return
+
+        if route == "/api/client-closed":
+            # 页面 pagehide 时 sendBeacon 过来。注意：这里只是「申请」，真正要不要停
+            # 由 begin_client_closed_grace 按 hidden / 活跃工作 / 心跳三道门判断。
+            if not _is_loopback(self.client_address[0]):
+                return self._json(403, {"error": "只允许本机上报"})
+            hidden = False
+            try:
+                payload = json.loads(body or b"{}")
+                if isinstance(payload, dict):
+                    hidden = bool(payload.get("hidden")) or (
+                        str(payload.get("visibility") or "").strip().lower() == "hidden")
+            except Exception:
+                hidden = False
+            grace = begin_client_closed_grace(hidden, self.client_address[0])
+            return self._json(200, {
+                "ok": True,
+                "autostop": AUTOSTOP,
+                "hidden_seen": hidden,
+                "grace_seconds": grace,
+            })
 
         if route == "/api/shot":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
@@ -2675,6 +3038,7 @@ def _watch_server() -> None:
 
 
 def main():
+    _log_life("服务启动")
     # 热重启默认关闭：它会在文件一改时重启服务，正在录音的人会被打断
     if os.environ.get("DICT_RELOAD") == "1":
         _watch_server()
@@ -2698,9 +3062,21 @@ def main():
 
     try:
         host = "::" if args.host in ("127.0.0.1", "localhost", "0.0.0.0") else args.host
-        srv = DualStackServer((host, args.port), Handler)
-    except OSError:
-        srv = ThreadingHTTPServer((args.host, args.port), Handler)
+        try:
+            srv = DualStackServer((host, args.port), Handler)
+        except OSError as exc:
+            if _port_in_use(exc):
+                raise           # 端口被占：不能退到 IPv4 偷偷再起一个（会双实例共存）
+            # IPv6 双栈在这台机器上用不了（老系统 / 被禁用）时退回 IPv4；同样独占
+            srv = ExclusiveServer((args.host, args.port), Handler)
+    except OSError as exc:
+        # 端口已经被另一个实例占着：绝对不能共存（请求会被分到两个进程）
+        msg = f"端口 {args.port} 已被占用，第二个实例不能同时跑：{exc}"
+        _log(f"[fatal] {msg}")
+        _log_life(f"端口占用退出（port={args.port}）")
+        print(f"[fatal] {msg}", file=sys.stderr, flush=True)
+        _flush_logs()
+        raise SystemExit(2)
     start_watchdog()
     swept = sweep_audio()
     if swept:

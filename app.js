@@ -73,7 +73,21 @@
   let chunks = [], buffered = 0, segSeconds = 6;
   let segments = [], inflight = 0, fireQueue = [];
   let startedAt = 0, timerId = null, statsTimer = null;
+  // 本轮录音的「虚拟时钟」：at = sessionBaseAt + 已录秒数。
+  // 续录时沿用上次的 base 和 recordedSec，时间轴才不会从 00:00 重来，也不会因为中间隔了半小时跳一大段。
+  let sessionBaseAt = 0;
+  let pageTitle = '';          // 当前页面这节稿子的课程名（会话结束后 sessionTitle 会清空，但它不能丢）
+  let pageCurated = false;     // 这一页的内容是否已经成功整理过
+  let restoredSameSession = false;  // 页面内容是从 localStorage 接回来的同一节，草稿条别再喊「上次没整理」
+  let uploadEpoch = 0;         // 服务断开时 +1，旧请求回来不许再改 inflight / 重复写结果
+  let uploadUid = 0;
+  let uploadRetryTimer = null;
+  let recoveryBusy = false;
+  let pendingFinish = null;    // 收尾时还差几段没传完：服务恢复后自动接着收尾
+  const pendingUploadMap = new Map();
   let startPending = false;   // 防止「开始听课」被连点，起两套录音与计时器
+  let serviceStopped = false; // 服务被「停止服务」关掉：界面置灰，等它重新起来
+  let pingFailStreak = 0;     // 连续探活失败次数：一次失败先不报断开，避免误报
   let sessionTitle = '';      // 本节课程名，开始前填写，存稿和整理都用它
   const TITLES_KEY = 'lecture-transcribe:titles';
 
@@ -193,6 +207,291 @@
     start();
   }
 
+  // ------------------------------------------------------------ 开始前：有未整理内容时三选一
+  let resumeInfo = null;
+  let resumeBusy = false;
+
+  function showResumeError(msg) {
+    const el = $('resumeError');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.classList.toggle('hidden', !msg);
+  }
+
+  function setResumeBusy(text) {
+    resumeBusy = !!text;
+    const sub = $('resumeSub');
+    if (sub && text) {
+      if (!sub.dataset.old) sub.dataset.old = sub.textContent || '';
+      sub.textContent = text;
+    } else if (sub && !text && sub.dataset.old) {
+      sub.textContent = sub.dataset.old;
+      delete sub.dataset.old;
+    }
+    ['btnResumeContinue', 'btnResumeBackground', 'btnResumeClean'].forEach((id) => {
+      const b = $(id);
+      if (b) b.disabled = !!text;
+    });
+  }
+
+  function fillResumeModal(info) {
+    const titleEl = $('resumeTitle');
+    const subEl = $('resumeSub');
+    if (titleEl) titleEl.textContent = `上次还有 ${info.count} 段没整理（约 ${fmtClock((info.durationSec || 0) * 1000)}）`;
+    if (subEl) {
+      subEl.dataset.old = '';
+      subEl.textContent = `上次那节是《${info.title}》。继续录音会接在后面；另外两个选项会先存一份转写稿。`;
+    }
+    showResumeError('');
+  }
+
+  function openResumeModal(info) {
+    const layer = $('resumeModal');
+    if (!layer) { start(); return; }
+    resumeInfo = info;
+    resumeBusy = false;
+    setResumeBusy(false);
+    fillResumeModal(info);
+    layer.classList.remove('hidden');
+    setTimeout(() => {
+      const b = $('btnResumeContinue');
+      if (b) b.focus();
+    }, 40);
+  }
+
+  function closeResumeModal() {
+    const layer = $('resumeModal');
+    if (layer) layer.classList.add('hidden');
+    resumeInfo = null;
+    setResumeBusy(false);
+    showResumeError('');
+  }
+
+  function ensureContinuity(info) {
+    const d = info && info.draft;
+    if (d) {
+      sessionId = d.sessionId || sessionId || ('S' + Date.now());
+      sessionBaseAt = Number(d.sessionBaseAt) || sessionBaseAt;
+      recordedSec = Math.max(Number(recordedSec) || 0, Number(d.recordedSec) || 0);
+      seqNo = Math.max(seqNo, ...(d.segments || []).map((s) => Number(s.seq) || 0));
+    }
+    if (!recordedSec) recordedSec = estimateRecordedSec();
+    if (!sessionBaseAt) sessionBaseAt = Date.now() - recordedSec * 1000;
+    if (!sessionId) sessionId = 'S' + Date.now();
+    seqNo = Math.max(seqNo, ...segments.map((s) => Number(s.seq) || 0));
+    segments.forEach((s) => {
+      if (!s.at) {
+        const sec = timeToSec(s.time);
+        s.at = sessionBaseAt + (sec == null ? 0 : sec * 1000);
+      }
+    });
+    pageTitle = info.title || pageTitle;
+    sessionTitle = pageTitle;
+    pageCurated = false;
+    const t = $('txTitle');
+    if (t) t.textContent = pageTitle;
+    rememberTitle(pageTitle);
+  }
+
+  // 队列排空后重新合并一次：刚补传完的文字要进存稿/整理，不然会漏
+  function refreshResumeInfo(info) {
+    if (!info) return info;
+    let fresh = null;
+    try { fresh = collectUncurated(); } catch (_) { fresh = null; }
+    if (!fresh || !fresh.count) return info;
+    return {
+      ...info,
+      merged: fresh.merged,
+      count: fresh.count,
+      durationSec: Math.max(Number(info.durationSec) || 0, Number(fresh.durationSec) || 0),
+      draft: info.draft || fresh.draft,
+      shots: (fresh.shots && fresh.shots.length) ? fresh.shots : info.shots,
+    };
+  }
+
+  async function doResumeContinue() {
+    if (resumeBusy || !resumeInfo) return;
+    const info = resumeInfo;
+    closeResumeModal();
+    if (!segments.some((s) => (s.text || '').trim()) && info.draft) {
+      hydrateDraftToPage(info.draft);
+    } else {
+      ensureTranscriptRows();
+    }
+    ensureContinuity(info);
+    start({ resume: true, hint: `继续上次的录音（已 ${fmtClock(recordedSec * 1000)}），接着往后记。` });
+  }
+
+  async function saveTranscriptForInfo(info) {
+    const segs = (info.merged || []).filter((s) => (s.text || '').trim()).map((s) => ({
+      time: s.time, text: s.text, tr: s.tr || '', spk: Number(s.spk) || 0,
+    }));
+    if (!segs.length) return { ok: false, error: '没有可保存的内容' };
+    const res = await postJsonRetry('/api/save', {
+      title: info.title || defaultTitle(),
+      duration: fmtClock((info.durationSec || 0) * 1000),
+      segments: segs,
+      shots: info.shots || shots.map((x) => ({ sec: x.sec, name: x.name })),
+    }, 4, 1500);
+    if (!res.ok) return { ok: false, error: (res.error && res.error.message) || '保存失败' };
+    if (!res.data || !res.data.path) return { ok: false, error: '服务没有返回文件路径' };
+    return { ok: true, path: res.data.path };
+  }
+
+  // 清空页面，准备从 00:00 开新一节；不动别的课程的草稿
+  function clearPageForNewSession(opts = {}) {
+    clearStored();
+    hideBanner();               // 上一节的「已接回 / 没整理」提示别留到新一节
+    segments = [];
+    seqNo = 0;
+    recordedSec = 0;
+    sessionId = 'S' + Date.now();
+    sessionBaseAt = 0;
+    pageTitle = '';
+    sessionTitle = '';
+    pageCurated = true;
+    dirty = false;
+    restoredSameSession = false;
+    trQueue.length = 0;
+    trBusy = false;
+    stored.length = 0;
+    recoverBusy = false;
+    autoRecoverFails = 0;
+    autoRecoverNextAt = 0;
+    autoRecovering = false;
+    lastRecoverErr = '';
+    elTranscript.innerHTML = '<p class="empty" id="emptyHint">点右下角的「开始听课」，允许麦克风，讲到哪记到哪。</p>';
+    resetShots();
+    updateCamCount();
+    const t = $('txTitle');
+    if (t) t.textContent = '转写记录';
+    const badge = $('txMode');
+    if (badge) badge.classList.add('hidden');
+    const wrap = document.querySelector('.transcript-wrap');
+    if (wrap) wrap.classList.remove('restored');
+    setStatus('idle');
+    setStatsView('idle');
+    setMainState('idle');
+    btnPause.classList.add('is-collapsed');
+    setClockText('00:00');
+    elSegInfo.textContent = '今天';
+    elFoot.textContent = opts.archivedPath
+      ? '上一节转写稿已存：' + opts.archivedPath
+      : '上一节转写稿已存，可以开始新的一节。';
+    updateStats();
+    syncNotesButton();
+    updateModeChip();
+    renderDraftBar();
+  }
+
+  async function doResumeBackground() {
+    if (resumeBusy || !resumeInfo) return;
+    let info = resumeInfo;
+    setResumeBusy('等识别队列空闲…');
+    showResumeError('');
+    // 还有段在识别/排队时先不提交：等它们进页面，整理才不会漏字；等到超时也不硬等
+    const idle = await waitForTranscribeIdle(45000, (n) => setResumeBusy(`等识别队列空闲（还有 ${n} 段）…`));
+    if (!idle) {
+      setResumeBusy(false);
+      showResumeError('还有几段没识别完，先别开始；等它们传完再点一次。');
+      return;
+    }
+    info = refreshResumeInfo(info);
+    setResumeBusy('正在保存上次的转写稿…');
+    const saved = await saveTranscriptForInfo(info);
+    if (!saved.ok) {
+      setResumeBusy(false);
+      showResumeError('转写稿没存上，先别开始。检查本地服务后再试一次。');
+      return;
+    }
+    setResumeBusy('正在提交后台整理…');
+    const job = startJob(`后台整理 ${info.title}`);
+    updateJob(job, {
+      kind: 'background', draftTitle: info.title,
+      draftSessionId: (info.draft && info.draft.sessionId) || sessionId,
+      transcript: saved.path, detail: '提交后台整理…', pct: 1,
+    });
+    let serverJob = '';
+    try {
+      serverJob = await submitBackgroundNotes(info, job);
+    } catch (err) {
+      updateJob(job, {
+        status: 'error', detail: '提交失败：' + String(err.message || err).slice(0, 50),
+        retryable: true, draftTitle: info.title, transcript: saved.path,
+      });
+      setResumeBusy(false);
+      showResumeError('后台整理没提交上，先别开始；内容还在，可以稍后重试。');
+      return;
+    }
+    updateJob(job, { serverJob, detail: '后台整理中…', pct: 2 });
+    watchBackgroundJob(job, serverJob, info.title);
+    setResumeBusy(false);
+    closeResumeModal();
+    clearPageForNewSession({ archivedPath: saved.path });
+    openCourseModal();
+  }
+
+  async function doResumeClean() {
+    if (resumeBusy || !resumeInfo) return;
+    let info = resumeInfo;
+    setResumeBusy('等识别队列空闲…');
+    showResumeError('');
+    // 清空前必须确认队列空了，否则刚录的文字还没回来就被清掉
+    const idle = await waitForTranscribeIdle(45000, (n) => setResumeBusy(`等识别队列空闲（还有 ${n} 段）…`));
+    if (!idle) {
+      setResumeBusy(false);
+      showResumeError('还有几段没识别完，先别清空；等它们传完再点一次。');
+      return;
+    }
+    info = refreshResumeInfo(info);
+    setResumeBusy('正在保存上次的转写稿…');
+    const saved = await saveTranscriptForInfo(info);
+    if (!saved.ok) {
+      setResumeBusy(false);
+      showResumeError('转写稿没存上，先别清空。检查本地服务后再试一次。');
+      return;
+    }
+    removeDraft(info.title);
+    setResumeBusy(false);
+    closeResumeModal();
+    clearPageForNewSession({ archivedPath: saved.path });
+    openCourseModal();
+  }
+
+  function requestStart() {
+    if (running || startPending || mainState === 'busy') return;
+    if (serviceStopped) {
+      showBanner('服务已停止，先重新打开软件/启动脚本，等这页恢复后再开始。');
+      return;
+    }
+    const info = collectUncurated();
+    if (info.count > 0) openResumeModal(info);
+    else start();
+  }
+
+  function resumeDraftFromBar() {
+    const d = latestDraft();
+    if (!d) return;
+    const info = collectUncurated();
+    if (info.count > 0 && info.draft) openResumeModal(info);
+    else openResumeModal({
+      count: draftCount(d), title: d.title, durationSec: d.recordedSec || 0,
+      draft: d, merged: mergeForNotes([], d.title).segments, hasPage: false,
+    });
+  }
+
+  function organizeDraftFromBar() {
+    const d = latestDraft();
+    if (!d) return;
+    const pageSegs = segments.filter((s) => (s.text || '').trim());
+    if (pageSegs.length && pageTitle && pageTitle !== d.title) {
+      showBanner(`页面这节是《${pageTitle}》，和草稿《${d.title}》不是同一门课，先不合并。`);
+      return;
+    }
+    if (!pageSegs.length) hydrateDraftToPage(d);
+    generateNotes({ fromDraftBar: true });
+  }
+
 
   let recordedSec = 0;
   let lastSampleRate = 44100;
@@ -210,18 +509,273 @@
   let seqNo = 0;
   const stored = [];          // 已存盘待识别的片段 {seq, timeLabel, node}
   let recoverBusy = false;
+  // 降级不是终点：服务连续正常 10 秒就自动补识别；失败 10s→30s 退避，不刷屏
+  const AUTO_RECOVER_GRACE_MS = 10000;
+  let serverOkSince = 0;       // 连续探活正常的起点（0=当前不正常）
+  let autoRecoverFails = 0;
+  let autoRecoverNextAt = 0;
+  let autoRecovering = false;
+  let autoRecoverTimer = null;
+  let lastRecoverErr = '';     // 自动补识别失败原因，界面上要说清楚
+  const recoverLog = [];       // 最近几轮补识别结果（调试/自检用）
   let notesReady = false;     // 配了 DeepSeek KEY 才在结束时自动整理
 
   const STORE_KEY = 'lecture-transcribe:lastSession';
+  const DRAFT_KEY = 'lecture-transcribe:pendingDraft';
+
+  // ---------------- 未整理草稿（按课程名分开存，换课不覆盖） ----------------
+  // { version:1, drafts:[{ title, at, updatedAt, sessionId, sessionBaseAt, recordedSec, shots, segments:[{at,time,text,tr,spk,seq}] }] }
+  let draftStore = { version: 1, drafts: [] };
+  let draftSaveTimer = null;
+
+  function loadDrafts() {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      const list = Array.isArray(data) ? data : (data && data.drafts);
+      if (!Array.isArray(list)) return;
+      draftStore = {
+        version: 1,
+        drafts: list
+          .filter((d) => d && typeof d.title === 'string')
+          .map((d) => ({
+            title: d.title,
+            at: Number(d.at) || 0,
+            updatedAt: Number(d.updatedAt) || 0,
+            sessionId: d.sessionId || '',
+            sessionBaseAt: Number(d.sessionBaseAt) || 0,
+            recordedSec: Number(d.recordedSec) || 0,
+            shots: Array.isArray(d.shots) ? d.shots.filter((x) => x && x.name) : [],
+            segments: Array.isArray(d.segments)
+              ? d.segments.filter((s) => s && (s.text || '').trim()).map((s) => ({
+                at: Number(s.at) || 0,
+                time: s.time || '00:00',
+                text: String(s.text || ''),
+                tr: s.tr || '',
+                spk: Number(s.spk) || 0,
+                seq: Number(s.seq) || 0,
+              }))
+              : [],
+          }))
+          .filter((d) => d.segments.length),
+      };
+    } catch (_) { draftStore = { version: 1, drafts: [] }; }
+  }
+
+  function saveDraftsNow() {
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draftStore)); } catch (_) {}
+  }
+
+  function draftCount(d) {
+    return d ? (d.segments || []).filter((s) => (s.text || '').trim()).length : 0;
+  }
+
+  function draftFor(title, sid) {
+    if (!title) return null;
+    const list = draftStore.drafts.filter((d) => d.title === title);
+    if (sid) return list.find((d) => d.sessionId === sid) || null;
+    return list[0] || null;
+  }
+
+  function latestDraft() {
+    return draftStore.drafts.filter((d) => draftCount(d) > 0)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
+  }
+
+  function ensureDraft(title, sid) {
+    let d = sid ? draftFor(title, sid) : draftFor(title);
+    if (!d) {
+      d = {
+        title, at: 0, updatedAt: Date.now(), sessionId: sid || '',
+        sessionBaseAt: 0, recordedSec: 0, shots: [], segments: [],
+      };
+      draftStore.drafts.unshift(d);
+    }
+    return d;
+  }
+
+  function backgroundJobFor(title) {
+    return jobs.find((j) => j.kind === 'background' && j.status === 'running' && j.draftTitle === title) || null;
+  }
+
+  // 两段列表合并去重：同一个 at 只留一条，后来者覆盖文字/译文；按 at 排序
+  function mergeSegmentLists(base, extra) {
+    const out = [];
+    const byKey = new Map();
+    const norm = (s, fromDraft) => ({
+      at: Number(s.at) || 0,
+      time: s.time || '00:00',
+      text: String(s.text || ''),
+      tr: s.tr || '',
+      spk: Number(s.spk) || 0,
+      seq: Number(s.seq) || 0,
+      fromDraft,
+    });
+    const put = (s) => {
+      if (!(s.text || '').trim()) return;
+      const key = s.at ? `a${Math.round(s.at)}` : `s${s.seq}:${s.text.slice(0, 10)}`;
+      if (byKey.has(key)) {
+        const old = byKey.get(key);
+        Object.assign(old, s, { fromDraft: old.fromDraft && s.fromDraft });
+        return;
+      }
+      const item = norm(s, s.fromDraft);
+      byKey.set(key, item);
+      out.push(item);
+    };
+    (base || []).forEach((s) => put({ ...norm(s, true), fromDraft: true }));
+    (extra || []).forEach((s) => put({ ...norm(s, false), fromDraft: false }));
+    out.sort((a, b) => (a.at - b.at) || (a.seq - b.seq));
+    return out;
+  }
+
+  function syncDraftFromSegments(title, list, meta = {}) {
+    if (!title) return;
+    const segs = (list || []).filter((s) => (s.text || '').trim());
+    if (!segs.length) return;
+    const d = ensureDraft(title, meta.sessionId || '');
+    d.segments = mergeSegmentLists(d.segments, segs).map((s) => ({
+      at: s.at, time: s.time, text: s.text, tr: s.tr || '', spk: Number(s.spk) || 0, seq: s.seq,
+    }));
+    d.updatedAt = Date.now();
+    d.at = d.segments[0] ? d.segments[0].at : (d.at || Date.now());
+    d.sessionId = meta.sessionId || d.sessionId || '';
+    d.sessionBaseAt = Number(meta.sessionBaseAt) || d.sessionBaseAt || 0;
+    d.recordedSec = Math.max(Number(d.recordedSec) || 0, Number(meta.recordedSec) || 0);
+    if (Array.isArray(meta.shots)) d.shots = meta.shots;
+    saveDraftsSoon();
+    renderDraftBar();
+  }
+
+  function syncDraftFromPage() {
+    if (pageCurated) return;
+    const title = pageTitle || sessionTitle;
+    if (!title) return;
+    const segs = segments.map((s) => ({
+      at: s.at, time: s.time, text: s.text, tr: s.tr || '',
+      spk: spkLabels[String(s.seq)] || s.spk || 0, seq: s.seq,
+    }));
+    syncDraftFromSegments(title, segs, {
+      sessionId,
+      sessionBaseAt,
+      recordedSec,
+      shots: shots.map((x) => ({ sec: x.sec, name: x.name })),
+    });
+  }
+
+  function saveDraftsSoon() {
+    if (draftSaveTimer) return;
+    draftSaveTimer = setTimeout(() => {
+      draftSaveTimer = null;
+      saveDraftsNow();
+    }, 500);
+  }
+
+  function flushDraftSync() {
+    if (draftSaveTimer) { clearTimeout(draftSaveTimer); draftSaveTimer = null; }
+    syncDraftFromPage();
+    saveDraftsNow();
+  }
+
+  function removeDraft(title, sid) {
+    if (!title) return;
+    const before = draftStore.drafts.length;
+    // 没给 sid 就按标题全删；给了 sid 时，草稿自己没记 sid 的也算同一节（以前就是这样漏删的）
+    draftStore.drafts = draftStore.drafts.filter((d) => {
+      if (d.title !== title) return true;
+      if (!sid) return false;
+      if (!d.sessionId) return false;
+      return d.sessionId !== sid;
+    });
+    if (draftStore.drafts.length !== before) {
+      saveDraftsNow();
+      renderDraftBar();
+    }
+  }
+
+  // 这一节的草稿还在录/刚恢复，不算「上次没整理」
+  function draftIsCurrent(d) {
+    if (!d) return false;
+    const title = pageTitle || sessionTitle;
+    if (d.sessionId && d.sessionId === sessionId) {
+      return running || restoredSameSession;
+    }
+    return !!(running && !d.sessionId && title && d.title === title);
+  }
+
+  function estimateRecordedSec() {
+    let max = Number(recordedSec) || 0;
+    segments.forEach((s) => {
+      const sec = timeToSec(s.time);
+      if (sec != null) max = Math.max(max, sec + segSeconds);
+    });
+    return max;
+  }
+
+  function draftBarInfo() {
+    const runningBg = jobs.filter((j) => j.status === 'running' && j.kind === 'background');
+    if (runningBg.length) {
+      const names = runningBg.map((j) => `《${j.draftTitle || j.title}》`).slice(0, 2).join('');
+      return {
+        kind: 'job',
+        text: `后台整理中：${names}${runningBg.length > 2 ? ` 等 ${runningBg.length} 个` : ''}`,
+        count: 0,
+      };
+    }
+    // 正在录的/刚接回来的这一节不算「上次」：否则录音时顶部一直挂着「还有 N 段没整理」
+    const d = draftStore.drafts
+      .filter((x) => draftCount(x) > 0 && !draftIsCurrent(x))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
+    if (!d) return null;
+    return {
+      kind: 'draft',
+      text: `上次还有 ${draftCount(d)} 段没整理（《${d.title}》，约 ${fmtClock((d.recordedSec || 0) * 1000)}）`,
+      draft: d,
+      count: draftCount(d),
+    };
+  }
+
+  function renderDraftBar() {
+    const el = $('draftBar');
+    if (!el) return;
+    const info = draftBarInfo();
+    if (!info) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    const textEl = $('draftBarText');
+    if (textEl) textEl.textContent = info.text;
+    const actions = $('draftBarActions');
+    if (actions) actions.classList.toggle('hidden', info.kind !== 'draft');
+    el.classList.toggle('is-job', info.kind === 'job');
+  }
 
   function persistSession() {
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify({
         at: Date.now(),
-        segments: segments.map((x) => ({ seq: x.seq, time: x.time, text: x.text, tr: x.tr || '' })),
+        title: sessionTitle || pageTitle || '',
+        sessionId,
+        sessionBaseAt,
+        recordedSec,
+        seqNo,
+        segments: segments.map((x) => ({
+          seq: x.seq, at: x.at, time: x.time, text: x.text, tr: x.tr || '',
+          spk: spkLabels[String(x.seq)] || 0,
+        })),
         shots: shots.map((x) => ({ sec: x.sec, name: x.name })),
       }));
     } catch (_) { /* 隐私模式等情况忽略 */ }
+    scheduleDraftSync();
+  }
+
+  function scheduleDraftSync() {
+    if (pageCurated) return;
+    if (draftSaveTimer) return;
+    draftSaveTimer = setTimeout(() => {
+      draftSaveTimer = null;
+      syncDraftFromPage();
+      saveDraftsNow();
+    }, 500);
   }
 
   function restoreSession() {
@@ -233,16 +787,30 @@
       data = JSON.parse(raw);
     } catch (_) { return 0; }
     const list = (data && data.segments) || [];
+    restoredSameSession = list.length > 0;
     if (Array.isArray(data && data.shots)) {
       shots = data.shots.filter((x) => x && x.name).map((x) => ({ sec: Number(x.sec) || 0, name: x.name }));
       updateCamCount();
     }
     if (!list.length) return 0;
 
+    pageTitle = data.title || '';
+    sessionId = data.sessionId || sessionId;
+    recordedSec = Number(data.recordedSec) || 0;
+    const fallbackBase = Number(data.sessionBaseAt) || (Date.now() - recordedSec * 1000);
+    sessionBaseAt = fallbackBase;
+    if (!recordedSec) {
+      list.forEach((item) => {
+        const sec = timeToSec(item.time);
+        if (sec != null) recordedSec = Math.max(recordedSec, sec + (Number(segSeconds) || 6));
+      });
+    }
+    seqNo = Number(data.seqNo) || 0;
+
     elTranscript.innerHTML = '';
     segments = [];
     let maxSeq = 0;
-    list.forEach((item) => {
+    list.forEach((item, idx) => {
       const node = addSegmentRow(item.time || '00:00');
       node.x.classList.remove('pending');
       node.x.textContent = (item.text || '').trim() || '（（空））';
@@ -250,27 +818,221 @@
         node.tr.classList.remove('hidden');
         node.tr.textContent = item.tr;
       }
+      // 老数据没有 at：用「当前时间 - 总时长 + 时间标签」兜底，保证顺序不丢
+      const sec = timeToSec(item.time);
+      const at = Number(item.at) || (sec != null
+        ? fallbackBase + sec * 1000
+        : Date.now() - (list.length - idx) * 1000);
       segments.push({
-        seq: item.seq || 0, time: item.time, text: item.text || '', tr: item.tr || '',
+        seq: item.seq || 0, at, time: item.time, text: item.text || '', tr: item.tr || '',
+        spk: Number(item.spk) || 0,
         trEl: node.tr, spkEl: node.spk, translated: !!item.tr, trDir: 'restored',
       });
       maxSeq = Math.max(maxSeq, item.seq || 0);
     });
-    seqNo = maxSeq;
+    seqNo = Math.max(seqNo, maxSeq);
+    pageCurated = false;
+    dirty = false;
     updateStats();
     syncNotesButton();
     const badge = $('txMode');
     if (badge) {
-      badge.textContent = '上次的记录 ' + list.length + ' 段';
+      const d = draftFor(pageTitle, sessionId);
+      const pageKeys = new Set(list.map((s) => `a${Math.round(Number(s.at) || 0)}`));
+      const extra = d ? d.segments.filter((s) => !pageKeys.has(`a${Math.round(Number(s.at) || 0)}`)).length : 0;
+      badge.textContent = extra
+        ? `上次的记录 ${list.length} 段 · 草稿里另有 ${extra} 段`
+        : `上次的记录 ${list.length} 段`;
       badge.classList.remove('hidden');
     }
     const wrap = document.querySelector('.transcript-wrap');
     if (wrap) wrap.classList.add('restored');
+    if (segments.some((s) => (s.text || '').trim())) syncDraftFromPage();
     return list.length;
   }
 
   function clearStored() {
     try { localStorage.removeItem(STORE_KEY); } catch (_) {}
+  }
+
+  // ------------------------------------------------------------ 合并整理用
+
+  function fmtMMSS(sec) {
+    const total = Math.max(0, Math.floor(sec));
+    return pad2(Math.floor(total / 60)) + ':' + pad2(total % 60);
+  }
+
+  function normalizeSegAt(list, fallbackBase) {
+    const base = Number(fallbackBase) || Date.now();
+    return (list || []).filter((s) => (s.text || '').trim()).map((s, i) => ({
+      ...s,
+      at: Number(s.at) || (timeToSec(s.time) != null
+        ? base + timeToSec(s.time) * 1000
+        : base + i * 1000),
+    }));
+  }
+
+  // 当前页 + 同课程名的未整理草稿合并；用最早一段做原点重排 mm:ss，保证单调递增
+  function mergeForNotes(pageList, title, forcedDraft) {
+    const page = normalizeSegAt(pageList, sessionBaseAt || Date.now());
+    // 有页面内容时按 sessionId 找草稿：同一门课换了一节（新 sessionId）不混进去
+    let d = forcedDraft || null;
+    if (!d) {
+      d = page.length ? draftFor(title, sessionId) : draftStore.drafts
+        .filter((x) => x.title === title && draftCount(x) > 0)
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
+    }
+    const draft = d ? normalizeSegAt(d.segments, d.sessionBaseAt || sessionBaseAt || Date.now()) : [];
+    const pageKeys = new Set(page.map((s) => `a${Math.round(s.at)}`));
+    const merged = mergeSegmentLists(draft, page).map((s) => ({
+      at: s.at, time: s.time, text: s.text, tr: s.tr || '',
+      spk: Number(s.spk) || 0, seq: Number(s.seq) || 0, fromDraft: s.fromDraft,
+    }));
+    if (!merged.length) {
+      return { title, segments: [], added: 0, durationSec: 0, shots: shots.map((x) => ({ sec: x.sec, name: x.name })) };
+    }
+    merged.sort((a, b) => (a.at - b.at) || (a.seq - b.seq));
+    const origin = merged[0].at;
+    let last = -1;
+    merged.forEach((s) => {
+      let sec = Math.max(0, Math.round((s.at - origin) / 1000));
+      if (sec <= last) sec = last + 1;
+      s.time = fmtMMSS(sec);
+      last = sec;
+    });
+    const added = merged.filter((s) => s.fromDraft && !pageKeys.has(`a${Math.round(s.at)}`)).length;
+    return {
+      title,
+      segments: merged,
+      added,
+      durationSec: Math.max(last + 1, Number(recordedSec) || 0, Number(d && d.recordedSec) || 0),
+      shots: (Array.isArray(d && d.shots) && d.shots.length ? d.shots : shots.map((x) => ({ sec: x.sec, name: x.name }))),
+    };
+  }
+
+  function otherDraftTitles(title) {
+    return draftStore.drafts.filter((d) => d.title !== title && draftCount(d) > 0)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+
+  function renderSegmentsToTranscript() {
+    elTranscript.innerHTML = '';
+    segments.forEach((rec) => {
+      const node = addSegmentRow(rec.time || '00:00');
+      node.x.classList.remove('pending');
+      if ((rec.text || '').trim()) node.x.textContent = rec.text;
+      else { node.x.textContent = '（（空））'; }
+      if (rec.tr) {
+        node.tr.classList.remove('hidden');
+        node.tr.textContent = rec.tr;
+      }
+      rec.trEl = node.tr;
+      rec.spkEl = node.spk;
+    });
+    paintSpeakers();
+  }
+
+  function ensureTranscriptRows() {
+    const rows = elTranscript.querySelectorAll('.seg').length;
+    const usable = segments.filter((s) => (s.text || '').trim()).length;
+    if (usable && rows < usable) renderSegmentsToTranscript();
+  }
+
+  function hydrateDraftToPage(d) {
+    if (!d || !draftCount(d)) return false;
+    pageTitle = d.title;
+    sessionTitle = d.title;
+    sessionId = d.sessionId || ('S' + Date.now());
+    recordedSec = Math.max(Number(d.recordedSec) || 0, estimateRecordedSec());
+    sessionBaseAt = Number(d.sessionBaseAt) || (Date.now() - recordedSec * 1000);
+    if (Array.isArray(d.shots) && d.shots.length) {
+      shots = d.shots.filter((x) => x && x.name).map((x) => ({ sec: Number(x.sec) || 0, name: x.name }));
+      updateCamCount();
+    }
+    elTranscript.innerHTML = '';
+    segments = [];
+    let maxSeq = 0;
+    const sorted = d.segments.slice().sort((a, b) => (a.at - b.at) || (a.seq - b.seq));
+    sorted.forEach((item) => {
+      const node = addSegmentRow(item.time || '00:00');
+      node.x.classList.remove('pending');
+      node.x.textContent = (item.text || '').trim() || '（（空））';
+      if (item.tr) {
+        node.tr.classList.remove('hidden');
+        node.tr.textContent = item.tr;
+      }
+      if (item.spk) spkLabels[String(item.seq)] = item.spk;
+      segments.push({
+        seq: Number(item.seq) || 0,
+        at: Number(item.at) || sessionBaseAt,
+        time: item.time || '00:00',
+        text: item.text || '',
+        tr: item.tr || '',
+        spk: Number(item.spk) || 0,
+        trEl: node.tr,
+        spkEl: node.spk,
+        translated: !!item.tr,
+        trDir: 'restored',
+      });
+      maxSeq = Math.max(maxSeq, Number(item.seq) || 0);
+    });
+    seqNo = Math.max(seqNo, maxSeq);
+    recordedSec = Math.max(recordedSec, estimateRecordedSec());
+    pageCurated = false;
+    dirty = false;
+    const t = $('txTitle');
+    if (t) t.textContent = pageTitle;
+    const badge = $('txMode');
+    if (badge) {
+      badge.textContent = `上次的记录 ${segments.length} 段`;
+      badge.classList.remove('hidden');
+    }
+    const wrap = document.querySelector('.transcript-wrap');
+    if (wrap) wrap.classList.add('restored');
+    renderSegmentsToTranscript();
+    updateStats();
+    syncNotesButton();
+    renderDraftBar();
+    return true;
+  }
+
+  // 点「开始听课」前先看有没有还没整理的内容。返回值直接喂给三选一弹窗。
+  function collectUncurated() {
+    const pageSegs = segments.filter((s) => (s.text || '').trim());
+    let title = pageTitle || sessionTitle || '';
+    let d = pageSegs.length ? draftFor(title, sessionId) : draftFor(title);
+    if (!title) {
+      const ld = latestDraft();
+      if (ld) { title = ld.title; d = ld; }
+    }
+    if (!title && pageSegs.length) title = recentTitles()[0] || defaultTitle();
+    if (!d && title) d = draftFor(title);
+    // 后台正在整理的那份草稿不算「还没整理」，别拿它再开一轮
+    if (!pageSegs.length && d && backgroundJobFor(d.title)) {
+      return { count: 0, title, durationSec: 0, draft: null, merged: [] };
+    }
+    if (pageCurated && !d) return { count: 0, title: '', durationSec: 0, draft: null, merged: [] };
+    const mergedInfo = mergeForNotes(pageSegs, title);
+    const count = mergedInfo.segments.length;
+    if (!count) return { count: 0, title, durationSec: 0, draft: d, merged: [] };
+    const firstAt = mergedInfo.segments[0].at;
+    const lastAt = mergedInfo.segments[mergedInfo.segments.length - 1].at;
+    let durationSec = Math.max(
+      Number(recordedSec) || 0,
+      Number(d && d.recordedSec) || 0,
+      estimateRecordedSec(),
+      Math.round((lastAt - firstAt) / 1000) + segSeconds,
+    );
+    return {
+      count,
+      title: title || '上一节',
+      durationSec,
+      draft: d,
+      merged: mergedInfo.segments,
+      shots: mergedInfo.shots,
+      hasPage: pageSegs.length > 0,
+      startedAt: firstAt ? new Date(firstAt) : null,
+    };
   }
 
   // ------------------------------------------------------------ 工具
@@ -404,6 +1166,7 @@
   // ------------------------------------------------------------ 连接状态
 
   let connAsrOk = false, connNotesOk = false;
+  let lastAsrMsg = '', lastNotesMsg = '';
   let connAsrBad = false, connNotesBad = false;   // 只有 KEY 被拒才算「确定坏」
 
   const CONN_CACHE = 'lecture-transcribe:conn';
@@ -490,6 +1253,8 @@
     if (connAsrOk) cacheConn('asr', true);
     if (connNotesOk) cacheConn('notes', true);
 
+    lastAsrMsg = asr.msg || '';
+    lastNotesMsg = notes.msg || '';
     paintConn(elConnAsr, connAsrOk ? 'ok' : (connAsrBad ? 'bad' : ''),
       '硅基流动 · 语音识别 — ' + (asr.msg || '未知'));
     paintConn(elConnNotes, connNotesOk ? 'ok' : (connNotesBad ? 'bad' : ''),
@@ -500,7 +1265,12 @@
   }
 
   // 只有 KEY 被明确拒绝才拦；查不到状态时放行，不耽误上课
+  let gateBlocked = false;
   function applyGate() {
+    if (serviceStopped) {
+      if (btnMain) btnMain.disabled = true;
+      return;
+    }
     const blocked = connAsrBad || connNotesBad;
     if (btnMain) {
       btnMain.disabled = false;         // 永远可点：点了会告诉你为什么不能开始
@@ -510,10 +1280,14 @@
       const missing = [];
       if (connAsrBad) missing.push('硅基流动（识别）');
       if (connNotesBad) missing.push('DeepSeek（整理）');
-      showBanner(`${missing.join(' 和 ')} 的 KEY 被拒绝。到「设置」核对后保存，或点右上角标签重测。`);
-    } else {
+      const why = connNotesBad ? (lastNotesMsg || '') : (lastAsrMsg || '');
+      showBanner(`${missing.join(' 和 ')} 的 KEY 被拒绝。${why ? why + '。' : ''}`
+        + '到「设置」核对后保存，或点右上角标签重测。');
+    } else if (gateBlocked) {
+      // 只清掉自己报的 KEY 提示，别把「已接回上次记录」这类提示顺手抹掉
       hideBanner();
     }
+    gateBlocked = blocked;
   }
 
   // 「生成笔记」常驻：有内容才可点，没内容保持禁用
@@ -651,7 +1425,7 @@
   function syncNotesButton() {
     if (!btnNotes) return;
     const has = segments.some((s) => (s.text || '').trim().length > 0);
-    btnNotes.disabled = !has;
+    btnNotes.disabled = !has || serviceStopped;
     const wasReady = btnNotes.classList.contains('is-ready');
     btnNotes.classList.toggle('is-ready', has);
     // 从「还不能用」变成「能用」的瞬间，分裂一次
@@ -1176,13 +1950,15 @@
     el.addEventListener('animationend', () => el.classList.remove('reveal'), { once: true });
   }
 
-  // 带超时 + 一次重试的上传：接口偶发卡住时不会把整条流水线堵死
-  async function postWav(blob, attempt = 0) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), UPLOAD_TIMEOUT);
+  // 单次上传 + 60 秒硬超时：请求永远不会无限挂住，失败交给 pending 队列自动重传。
+  // 重试不再压在这一次 fetch 里，否则断开时一条请求能堵好几分钟。
+  async function postWav(blob, opts = {}) {
+    const ctrl = opts.ctrl || new AbortController();
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, UPLOAD_TIMEOUT);
     try {
       const spkUrl = `/api/transcribe?lang=${encodeURIComponent(currentLang)}`
-        + `&session=${encodeURIComponent(sessionId || '')}&seq=${seqNo}`;
+        + `&session=${encodeURIComponent(opts.session || sessionId || '')}`
+        + `&seq=${encodeURIComponent(opts.seq == null ? seqNo : opts.seq)}`;
       const res = await fetch(spkUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
@@ -1190,7 +1966,6 @@
         signal: ctrl.signal,
       });
       const data = await res.json().catch(() => ({ error: '返回内容无法解析' }));
-      if (attempt > 0 && res.ok && !data.error) hideBanner();   // 服务回来了，收掉断线提示
       if (!res.ok || data.error) {
         const err = new Error(data.error || `HTTP ${res.status}`);
         err.status = res.status;
@@ -1198,27 +1973,8 @@
       }
       return data;
     } catch (err) {
-      if (attempt === 0 && err.status === 429) {
-        await sleep(8000);               // 被限流：退避后再试一次
-        return postWav(blob, 1);
-      }
-      // 网络断开（多半是黑窗口被关了）：等本地服务回来，最多重试 5 次、约 15 秒
-      if (!err.status) err.network = true;      // 只有网络类错误才算「连不上」，别把代码 bug 也算进去
-      if (!err.status && attempt < 5) {
-        setModeText(`等待本地服务 ${attempt + 1}/5`, 'warn');
-        if (attempt === 0) {
-          showBanner('本地服务暂时连不上，正在重试…如果桌面那个黑色窗口被关了，重新运行「课堂转写.bat」，回来会自动续上。');
-        }
-        await sleep(2500);
-        return postWav(blob, attempt + 1);
-      }
-      const retryable = attempt === 0 && (
-        err.name === 'AbortError' || err.status === undefined || err.status >= 500
-      );
-      if (retryable) {
-        await sleep(1200);
-        return postWav(blob, 1);
-      }
+      if (!err.status && err.name !== 'AbortError') err.network = true;
+      if (err.name === 'AbortError') err.timeout = true;
       throw err;
     } finally {
       clearTimeout(timer);
@@ -1286,73 +2042,178 @@
     if (tone) rowEl.appendChild(tone);
   }
 
-  async function uploadSegment(blob, timeLabel, node, seq, tone) {
-    inflight++;
-    const rowEl = node.x;
-    // 转写区可能已经被清空（例如点「结束并保存」后），那时候只收数据、不碰 DOM
-    const alive = () => !!(node && node.row && node.row.isConnected);
-    const rec = { seq, time: timeLabel, text: '', tr: '', trEl: node.tr, spkEl: node.spk, translated: false };
-    try {
-      const data = await postWav(blob);
-      const text = (data.text || '').trim();
-      if (alive()) rowEl.classList.remove('pending');
-      lastTextAt = Date.now();
-    const plain = (text || '').trim();
-    if (plain.length > 80) flashEmotion('13', null, 1500);          // 惊讶：这段特别长
-    else if (/[?？]$/.test(plain)) flashEmotion('11', null, 1400);  // 疑惑：问句
-    if (alive()) {
-      if (text) setRowText(rowEl, text);
-      else foldSilence(rowEl, timeLabel);
-      maybeTagTone(rowEl, tone, text, seq);
+  function livePendingCount() {
+    return fireQueue.filter((it) => it.state !== 'done' && it.state !== 'failed').length;
+  }
+
+  function failedPendingCount() {
+    return fireQueue.filter((it) => it.state === 'failed').length;
+  }
+
+  function removeFromPending(item) {
+    pendingUploadMap.delete(item.uid);
+    const i = fireQueue.indexOf(item);
+    if (i >= 0) fireQueue.splice(i, 1);
+  }
+
+  function scheduleUploadRetry() {
+    if (uploadRetryTimer || serverDown) return;
+    uploadRetryTimer = setTimeout(() => {
+      uploadRetryTimer = null;
+      if (serverDown) return;
+      fireQueue.forEach((it) => { if (it.state === 'retry') it.state = 'queued'; });
+      updateModeChip();
+      pump();
+    }, 2500);
+  }
+
+  function afterUploadSettled() {
+    if (recoveryBusy && livePendingCount() === 0) {
+      recoveryBusy = false;
+      showServerAlert('服务已恢复，补传完成', 'recovered');
+      showBanner('服务已恢复，刚才欠的音频补传完了。');
+      setTimeout(() => { if (!serverDown) hideServerAlert(); }, 2600);
     }
+    if (pendingFinish && livePendingCount() === 0) {
+      setTimeout(() => { if (pendingFinish && livePendingCount() === 0) resumePendingFinish(); }, 60);
+    }
+  }
+
+  // 整理/存稿前先让实时转写队列排空：还有段在识别或排队时提交，会漏掉那几段文字。
+  // 超过 maxMs 就不等了（整理最终必须能跑完），返回 false 让调用方决定怎么说。
+  async function waitForTranscribeIdle(maxMs = 45000, onWait) {
+    const t0 = Date.now();
+    while (inflight > 0 || livePendingCount() > 0) {
+      if (Date.now() - t0 >= maxMs) return false;
+      if (onWait) onWait(Math.max(inflight, livePendingCount()));
+      await sleep(250);
+    }
+    return true;
+  }
+
+  function handleUploadFailure(item, err) {
+    const rowEl = item.node && item.node.x;
+    const alive = () => !!(item.node && item.node.row && item.node.row.isConnected);
+    const retryable = err.timeout || err.name === 'AbortError'
+      || err.status === 429 || !err.status || err.status >= 500;
+    failStreak += 1;
+    lastRecogErr = String(err.message || err).slice(0, 140);
+    if (retryable) {
+      item.state = 'retry';
+      item.lastError = String(err.message || err).slice(0, 120);
+      if (alive()) {
+        rowEl.classList.remove('pending', 'error');
+        rowEl.classList.add('waiting');
+        setRowText(rowEl, serverDown ? '服务断开，等恢复后补传' : '没传上去，稍后自动重传');
+      }
+      if (!item.reported) {
+        item.reported = true;
+        reportClientError('upload', err, `seq=${item.seq} time=${item.timeLabel}`);
+      }
+      if (!serverDown) scheduleUploadRetry();
+      else setEmotion('34');
+      if (!item.bannerShown) {
+        item.bannerShown = true;
+        showBanner('有一段没传上去，先存在页面里，等服务恢复后自动补传。');
+      }
+    } else {
+      item.state = 'failed';
+      item.lastError = String(err.message || err).slice(0, 120);
+      reportClientError('upload', err, `seq=${item.seq} time=${item.timeLabel}`);
+      if (alive()) {
+        rowEl.classList.remove('pending');
+        rowEl.classList.add('error');
+        if (err.status === 401 || err.status === 403 || /(KEY|api key|令牌|认证)/i.test(err.message)) {
+          setRowText(rowEl, '识别失败：KEY 不对');
+          showBanner('识别接口的 KEY 有问题。点右上角「设置」核对第一组 KEY 后保存。');
+        } else {
+          setRowText(rowEl, `识别失败：${err.message}`);
+        }
+      }
+    }
+  }
+
+  async function uploadSegment(item) {
+    if (!item || item.state === 'uploading' || item.state === 'done' || item.state === 'failed') return;
+    // 去重：这段已经有文字（例如服务其实处理完、结果已经写进页面），不再重传
+    if (item.rec && (item.rec.text || '').trim()) { item.state = 'done'; removeFromPending(item); return; }
+    if (item.segList && item.segList.some((s) => s.seq === item.seq && (s.text || '').trim())) {
+      item.state = 'done';
+      removeFromPending(item);
+      return;
+    }
+    const epoch = uploadEpoch;
+    const node = item.node;
+    const rowEl = node && node.x;
+    const alive = () => !!(node && node.row && node.row.isConnected);
+    item.state = 'uploading';
+    item.attempts = (item.attempts || 0) + 1;
+    item.ctrl = new AbortController();
+    inflight += 1;
+    if (alive()) {
+      rowEl.classList.remove('error', 'waiting');
+      rowEl.classList.add('pending');
+      if (item.attempts > 1) setRowText(rowEl, '重传中…');
+      else setRowText(rowEl, '识别中…');
+    }
+    const rec = {
+      seq: item.seq, at: item.at, time: item.timeLabel, text: '', tr: '',
+      trEl: node && node.tr, spkEl: node && node.spk, translated: false,
+    };
+    try {
+      const data = await postWav(item.wav, {
+        session: item.session, seq: item.seq, ctrl: item.ctrl,
+      });
+      if (epoch !== uploadEpoch) { item.state = 'queued'; return; }
+      const text = (data.text || '').trim();
       rec.text = text;
-      segments.push(rec);
+      item.rec = rec;
+      item.state = 'done';
+      item.text = text;
+      removeFromPending(item);
+      if (alive()) {
+        rowEl.classList.remove('pending', 'error', 'waiting');
+      }
+      lastTextAt = Date.now();
+      const plain = text;
+      if (plain.length > 80) flashEmotion('13', null, 1500);          // 惊讶：这段特别长
+      else if (/[?？]$/.test(plain)) flashEmotion('11', null, 1400);  // 疑惑：问句
+      if (alive()) {
+        if (text) setRowText(rowEl, text);
+        else foldSilence(rowEl, item.timeLabel);
+        maybeTagTone(rowEl, item.tone, text, item.seq);
+      }
+      const target = item.segList || segments;
+      target.push(rec);
       dirty = true;
       scheduleSpeakers();
       if (running && Math.random() < 0.12) flashEmotion('10', '16', 1600);
-      persistSession();
+      if (target === segments) persistSession();
+      else syncDraftFromSegments(item.title || pageTitle, target, {
+        sessionId: item.session, sessionBaseAt: item.sessionBaseAt, recordedSec: item.recordedSec,
+      });
       syncNotesButton();
       renderTags();
       enqueueTranslate(rec);
       failStreak = 0;
     } catch (err) {
-      reportClientError('upload', err, `seq=${seq} time=${timeLabel}`);
-      failStreak++;
-      lastRecogErr = String(err.message || err).slice(0, 140);
-      if (alive()) {
-        rowEl.classList.remove('pending');
-        rowEl.classList.add('error');
+      if (epoch !== uploadEpoch) {
+        if (item.state !== 'done') item.state = 'queued';
+        return;
       }
-      setEmotion('34');
-      flashEmotion('17', null, 1500);   // 慌张
-      if (err.name === 'AbortError') {
-      setTimeout(() => setEmotion('15'), 2400);
-        if (alive()) setRowText(rowEl, '识别超时：这一段没送出去');
-        showBanner('有一段音频识别超过 60 秒没响应，已跳过。网络不稳时会偶发，可以继续听。');
-      } else if (err.status === undefined && err.network) {
-        if (alive()) setRowText(rowEl, '上传失败：连不上本地服务');
-        showBanner(`连不上本地服务（页面地址 ${location.origin}，错误 ${err.name}: ${String(err.message).slice(0, 60)}）。`
-          + '如果地址栏不是 http://127.0.0.1:8787，请换这个地址打开；否则重开「课堂转写.bat」后刷新页面。');
-      } else if (err.status === undefined) {
-        // 非网络类异常（前端 bug）：明确说是本地出错，不要误导成断网
-        console.error('[segment] 处理出错', err);
-        if (alive()) setRowText(rowEl, '这一段处理出错了（不是网络问题）');
-        showBanner(`这一段处理出错：${String(err.message).slice(0, 80)}。其它段不受影响，可以继续。`, 9000);
-      } else {
-        if (alive()) setRowText(rowEl, `识别失败：${err.message}`);
-        if (/(KEY|api key|令牌|认证)/i.test(err.message)) {
-          showBanner('识别接口的 KEY 有问题。点右上角「设置」核对第一组 KEY 后保存。');
-        }
-      }
+      handleUploadFailure(item, err);
     } finally {
-      inflight--;
-      elSegInfo.textContent = `已转写 ${segments.length} 段`;
+      if (epoch === uploadEpoch) {
+        inflight = Math.max(0, inflight - 1);
+      }
+      elSegInfo.textContent = `已转写 ${segments.length} 段` + (livePendingCount() ? ` · 还有 ${livePendingCount()} 段待补传` : '');
       updateModeChip();
       updateStats();
       syncNotesButton();
       if (followTail) scrollToBottom();
       pump();
-      if (running) {
+      afterUploadSettled();
+      if (running && !serverDown) {
         if (fireQueue.length >= BACKLOG_LIMIT) degrade(`排队 ${fireQueue.length} 段`);
         else if (failStreak >= 3) { setEmotion('21'); degrade(`连续失败 ${failStreak} 次`); }
       }
@@ -1559,24 +2420,31 @@
   }
 
   function pump() {
-    while (inflight < MAX_INFLIGHT && fireQueue.length) {
-      const item = fireQueue.shift();
-      uploadSegment(item.wav, item.timeLabel, item.node, item.seq, item.tone);
+    if (serverDown) return;
+    while (inflight < MAX_INFLIGHT) {
+      const item = fireQueue.find((it) => it.state === 'queued');
+      if (!item) return;
+      uploadSegment(item);
     }
   }
 
   // 实时识别跟不上时，切到「只存盘」
   function degrade(reason) {
-    if (mode === 'deferred') return;
+    if (mode === 'deferred' || serverDown) return;
     mode = 'deferred';
+    // 服务本身可能是好的，只是识别接口挂了/限流：从这一刻起等 10 秒再自动补
+    autoRecoverFails = 0;
+    autoRecoverNextAt = Date.now() + AUTO_RECOVER_GRACE_MS;
+    lastRecoverErr = lastRecogErr || '';
 
     setEmotion('32');
     updateModeChip();
     elModeChip.classList.add('deferred');
     const why = lastRecogErr ? `：\n${lastRecogErr}` : '';
-    showBanner(`识别跟不上（${reason}${why}）\n已切成「先存盘」：音频照常录、照常保存，讲完点「结束并保存」会自动补识别，不丢内容。`);
-    const backlog = fireQueue.splice(0);
-    backlog.forEach(storeSegment);
+    showBanner(`识别跟不上（${reason}${why}）\n已切成「先存盘」：音频照常录、照常保存，服务恢复后会自动补识别，不用手动点。`);
+    const backlog = fireQueue.filter((it) => it.state === 'queued' || it.state === 'retry');
+    backlog.forEach((item) => { removeFromPending(item); storeSegment(item); });
+    updateRecoverBtn();
   }
 
   async function storeSegment(item) {
@@ -1584,15 +2452,21 @@
     rowEl.classList.remove('error');
     rowEl.classList.add('pending');
     setRowText(rowEl, '已存盘，待识别');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, UPLOAD_TIMEOUT);
     try {
-      const res = await fetch(`/api/segment?session=${encodeURIComponent(sessionId)}&seq=${item.seq}`, {
+      const res = await fetch(`/api/segment?session=${encodeURIComponent(item.session || sessionId)}&seq=${item.seq}`, {
         method: 'POST',
         headers: { 'Content-Type': 'audio/wav' },
         body: item.wav,
+        signal: ctrl.signal,
       });
       const data = await res.json().catch(() => ({ error: '返回内容无法解析' }));
       if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
       stored.push(item);
+      if (mode === 'deferred' && !serverDown && !autoRecoverNextAt) {
+        autoRecoverNextAt = Date.now() + AUTO_RECOVER_GRACE_MS;
+      }
       updateRecoverBtn();
       updateModeChip();
       updateStats();
@@ -1600,6 +2474,8 @@
       rowEl.classList.remove('pending');
       rowEl.classList.add('error');
       setRowText(rowEl, `音频没存下来：${err.message}`);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -1607,17 +2483,25 @@
   function updateModeChip() {
     const el = $('modeChip');
     if (!el) return;
-    const queued = inflight + fireQueue.length;
+    const waiting = livePendingCount();
     el.className = 'mode-chip';
 
     if (recoverBusy) {
       el.classList.add('busy');
-      el.textContent = '补识别中…';
+      el.textContent = autoRecovering ? '自动补识别中…' : '补识别中…';
+      return;
+    }
+    if (serverDown) {
+      el.classList.add('warn');
+      el.textContent = waiting ? `服务断开 · 待补传 ${waiting} 段` : '服务断开';
       return;
     }
     if (mode === 'deferred') {
       el.classList.add('warn');
-      el.textContent = stored.length ? `先存盘 · 待识别 ${stored.length}` : '先存盘 · 待补识别';
+      if (autoRecoverFails) el.classList.add('busy');
+      el.textContent = stored.length
+        ? `先存盘 · 待识别 ${stored.length}` + (autoRecoverFails ? ' · 自动重试中' : ' · 自动补识别中')
+        : '先存盘 · 待补识别';
       return;
     }
     if (running && paused) {
@@ -1626,19 +2510,24 @@
       return;
     }
     if (running) {
-      if (fireQueue.length > 5) setEmotion('18');   // 无奈：堵太多了
-    if (fireQueue.length > 0) {           // 音频已切好，但还没送到识别接口
-        el.classList.add('busy');
-        el.textContent = `排队解析 ${fireQueue.length} 段`;
-          return;
-      }
+      if (waiting > 5) setEmotion('18');   // 无奈：堵太多了
       if (inflight > 0) {                   // 正在调识别接口
         el.classList.add('busy');
-        el.textContent = '解析中…';
-          return;
+        el.textContent = waiting > 1 ? `解析中 · 待补 ${waiting - 1} 段` : '解析中…';
+        return;
+      }
+      if (waiting > 0) {                    // 音频已切好，但还没送到识别接口 / 等重传
+        el.classList.add('busy');
+        el.textContent = `待补传 ${waiting} 段`;
+        return;
       }
       el.classList.add('ok');
       el.textContent = '收音中';
+      return;
+    }
+    if (waiting > 0) {
+      el.classList.add('busy');
+      el.textContent = `待补传 ${waiting} 段`;
       return;
     }
     el.textContent = '未开始';
@@ -1649,64 +2538,153 @@
       btnRecover.classList.add('hidden');
       return;
     }
+    // 自动补识别还没失手时先把按钮收起来（用户不用点）；失手后才露出来当兜底
+    if (!autoRecoverFails && !serverDown) {
+      btnRecover.classList.add('hidden');
+      return;
+    }
     reveal(btnRecover);
-    btnRecover.textContent = `补识别 ${stored.length} 段`;
+    btnRecover.textContent = autoRecovering ? '自动补识别中…' : `补识别 ${stored.length} 段`;
+    btnRecover.disabled = recoverBusy;
   }
 
-  // 依序把存盘的片段补识别回来
-  async function recoverStored() {
-    if (recoverBusy || !stored.length) return;
+  function recoverFailureText(waitMs) {
+    const why = lastRecoverErr ? `：${lastRecoverErr}` : '';
+    const sec = Math.max(1, Math.round(waitMs / 1000));
+    return `自动补识别失败${why}\n已存盘 ${stored.length} 段，${sec} 秒后自动重试；也可以点「补识别 ${stored.length} 段」手动重试。`;
+  }
+
+  function showRecoverFailure(waitMs) {
+    showBanner(recoverFailureText(waitMs));
+    elSegInfo.textContent = `补识别失败，待识别 ${stored.length} 段`;
+    setEmotion('34');
+  }
+
+  // 依序把存盘的片段补识别回来；返回 true=本轮没有失败（可能仍有新存进来的）
+  async function recoverStored(opts = {}) {
+    if (recoverBusy || !stored.length) return false;
     recoverBusy = true;
+    autoRecovering = !!opts.auto;
     btnRecover.disabled = true;
-    const total = stored.length;
+    const total = stored.length;      // 只吃这一轮开始时的数量，期间新存的下轮再补
     let done = 0;
+    let ok = true;
     setEmotion('40');
     updateModeChip();
-    while (stored.length) {
+    updateRecoverBtn();
+    for (let i = 0; i < total && stored.length; i += 1) {
       const item = stored.shift();
       const rowEl = item.node.x;
       btnRecover.textContent = `补识别中 ${done}/${total}`;
       elSegInfo.textContent = `补识别 ${done}/${total}`;
       setRowText(rowEl, '识别中…');
       try {
-        const res = await fetch('/api/transcribe-file', {
+        const data = await localJson('/api/transcribe-file', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session: sessionId, seq: item.seq, lang: currentLang }),
-        });
-        const data = await res.json().catch(() => ({ error: '返回内容无法解析' }));
-        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+          body: JSON.stringify({ session: item.session || sessionId, seq: item.seq, lang: currentLang }),
+        }, 65000);
         const text = (data.text || '').trim();
         rowEl.classList.remove('pending');
         if (text) setRowText(rowEl, text);
         else foldSilence(rowEl, item.timeLabel);
         maybeTagTone(rowEl, null, text, item.seq);
-        const rec = { seq: item.seq, time: item.timeLabel, text, tr: '', trEl: item.node.tr, translated: false };
+        const rec = {
+          seq: item.seq, at: item.at, time: item.timeLabel, text, tr: '',
+          trEl: item.node.tr, spkEl: item.node.spk, translated: false,
+        };
         segments.push(rec);
-      if (running && Math.random() < 0.12) flashEmotion('10', '16', 1600);
+        if (running && Math.random() < 0.12) flashEmotion('10', '16', 1600);
         enqueueTranslate(rec);
+        persistSession();
         done++;
+        updateStats();
       } catch (err) {
+        lastRecoverErr = String((err && err.message) || err).slice(0, 120);
         rowEl.classList.remove('pending');
         rowEl.classList.add('error');
-        setRowText(rowEl, `补识别失败：${err.message}`);
+        setRowText(rowEl, `补识别失败：${lastRecoverErr}`);
+        stored.unshift(item);          // 没补成就留着，别悄悄丢
+        ok = false;
+        break;
       }
     }
     recoverBusy = false;
+    autoRecovering = false;
     btnRecover.disabled = false;
-    setEmotion('19');
-    mode = 'live';
+    if (ok) {
+      lastRecoverErr = '';
+      if (!stored.length) {
+        mode = 'live';                // 补完了，实时识别回来
+        failStreak = 0;               // 旧的连续失败计数不能带到恢复后，否则一次抖动又降级
+        lastRecogErr = '';
+        autoRecoverFails = 0;
+        autoRecoverNextAt = 0;
+        setEmotion('19');
+        if (opts.auto) showBanner(`已自动补识别 ${done} 段，实时识别恢复。`);
+        else showBanner(`补识别完成（${done} 段），已回到实时识别。`);
+      } else {
+        // 补识别期间又存了新片段：继续 deferred，马上再补一轮
+        mode = 'deferred';
+        autoRecoverNextAt = Date.now() + 1500;
+      }
+    } else {
+      mode = 'deferred';              // 失败绝不假装回到 live
+    }
     updateModeChip();
     updateRecoverBtn();
-    elSegInfo.textContent = `已转写 ${segments.length} 段`;
+    elSegInfo.textContent = stored.length
+      ? `已转写 ${segments.length} 段 · 待补识别 ${stored.length}`
+      : `已转写 ${segments.length} 段`;
+    recoverLog.push({ at: Date.now(), auto: !!opts.auto, before: total, done, ok, left: stored.length, err: lastRecoverErr });
+    if (recoverLog.length > 20) recoverLog.shift();
     updateStats();
+    return ok;
+  }
+
+  // 自动补识别：服务连续正常 ≥10 秒、有存盘、空闲时才跑；同一时间只跑一个
+  function autoRecoverReady() {
+    if (autoRecovering || recoverBusy || serverDown) return false;
+    if (mode !== 'deferred' || !stored.length) return false;
+    if (!serverOkSince || Date.now() - serverOkSince < AUTO_RECOVER_GRACE_MS) return false;
+    return Date.now() >= autoRecoverNextAt;
+  }
+
+  async function autoRecoverTick() {
+    if (!autoRecoverReady()) return;
+    autoRecovering = true;
+    updateModeChip();
+    updateRecoverBtn();
+    const ok = await recoverStored({ auto: true });
+    autoRecovering = false;
+    if (ok) {
+      autoRecoverFails = 0;
+      if (mode === 'live') autoRecoverNextAt = 0;
+      else autoRecoverNextAt = Date.now() + 1500;   // 期间又存了新的，马上再补一轮
+    } else {
+      autoRecoverFails += 1;
+      const wait = autoRecoverFails <= 1 ? 10000 : 30000;
+      autoRecoverNextAt = Date.now() + wait;
+      showRecoverFailure(wait);
+    }
+    updateModeChip();
+    updateRecoverBtn();
+    updateStats();
+  }
+
+  function startAutoRecoverWatch() {
+    if (autoRecoverTimer) return;
+    autoRecoverTimer = setInterval(() => {
+      if (document.hidden) return;
+      autoRecoverTick();
+    }, 2000);
   }
 
   function drain(timeoutMs = 25000) {
     const deadline = Date.now() + timeoutMs;
     return new Promise((resolve) => {
       const tick = () => {
-        if (inflight === 0 && fireQueue.length === 0) return resolve();
+        if (inflight === 0 && livePendingCount() === 0) return resolve();
         if (Date.now() > deadline) return resolve();
         setTimeout(tick, 150);
       };
@@ -1736,11 +2714,25 @@
     const seqValue = ++seqNo;
     const tone = toneTag(pcm, TARGET_RATE);   // 只算不挂：等识别出文字后一起决定
 
-    const item = { wav, timeLabel, node, seq: seqValue, tone };
+    if (!sessionBaseAt) sessionBaseAt = Date.now() - recordedSec * 1000;
+    pageCurated = false;      // 又录了新段落，这一页重新变成「未整理」
+    const item = {
+      uid: ++uploadUid,
+      wav, timeLabel, node, seq: seqValue, tone,
+      at: Math.round(sessionBaseAt + segStartSec * 1000),
+      session: sessionId,
+      title: pageTitle || sessionTitle,
+      sessionBaseAt,
+      recordedSec,
+      segList: segments,
+      state: 'queued',
+      attempts: 0,
+    };
 
     if (mode === 'deferred') {
       storeSegment(item);
     } else {
+      pendingUploadMap.set(item.uid, item);
       fireQueue.push(item);
       pump();
     }
@@ -1748,12 +2740,22 @@
 
   // ------------------------------------------------------------ 采集
 
-  async function start() {
+  async function start(opts = {}) {
+    const resume = opts.resume === true;
     if (running || startPending) { return; }
-    if (!sessionTitle) { openCourseModal(); return; }
+    if (serviceStopped) {
+      showBanner('服务已停止，等它重新起来（重新打开软件）后再开始。');
+      return;
+    }
+    if (!sessionTitle) {
+      if (!resume) { openCourseModal(); return; }
+      sessionTitle = pageTitle;
+    }
+    if (!resume && !sessionTitle) { openCourseModal(); return; }
 
-    // 上一段还没保存就点开始：先把转写稿存下来，存不了就不清屏
-    if (dirty && segments.some((x) => (x.text || '').trim())) {
+    // 新开一节：上一段还没保存就先把转写稿存下来，存不了就不清屏。
+    // 续录时绝对不能走这里——内容要原样留着。
+    if (!resume && dirty && segments.some((x) => (x.text || '').trim())) {
       setModeText('先保存上一段…', 'busy');
       const ok = await saveSession();
       if (!ok) {
@@ -1866,32 +2868,45 @@
     running = true;
     paused = false;
 
-    startedAt = Date.now();
-    recordedSec = 0;
+    startedAt = Date.now() - (resume ? recordedSec * 1000 : 0);
     silenceMs = 0;
     speechSeen = false;
     lastToneSeq = -99;
     lastToneEmoji = '';
     noiseFloor = 0.02;
-    segments = [];
-    seqNo = 0;
     trQueue.length = 0;
     trBusy = false;
-
-    // 新会话：重置降级状态
-    sessionId = 'S' + Date.now();
     mode = 'live';
     failStreak = 0;
-    seqNo = 0;
-    stored.length = 0;
     recoverBusy = false;
-    mode = 'live';
-    btnRecover.classList.add('hidden');
+    autoRecoverFails = 0;
+    autoRecoverNextAt = 0;
+    autoRecovering = false;
+    lastRecoverErr = '';
     btnBackfill.classList.add('hidden');
-    elTranscript.innerHTML = '';
-    dirty = false;
-    clearStored();
-    resetShots();                       // 新的一节课，截图重新计数
+    if (!resume) {
+      recordedSec = 0;
+      segments = [];
+      seqNo = 0;
+      sessionId = 'S' + Date.now();
+      sessionBaseAt = Date.now();
+      pageTitle = sessionTitle;
+      pageCurated = false;
+      restoredSameSession = false;
+      stored.length = 0;
+      btnRecover.classList.add('hidden');
+      elTranscript.innerHTML = '';
+      dirty = false;
+      clearStored();
+      resetShots();                       // 新的一节课，截图重新计数
+    } else {
+      // 续录：保留 segments / seqNo / sessionId / sessionBaseAt / recordedSec / shots，
+      // 新段落的时间标签从「已录时长」接着走。
+      if (!sessionBaseAt) sessionBaseAt = Date.now() - recordedSec * 1000;
+      if (!sessionId) sessionId = 'S' + Date.now();
+      pageTitle = pageTitle || sessionTitle;
+      ensureTranscriptRows();
+    }
     const badge = $('txMode');
     if (badge) badge.classList.add('hidden');
     const wrap = document.querySelector('.transcript-wrap');
@@ -1935,12 +2950,16 @@
       const q = inflight + fireQueue.length;
       elFoot.textContent = `录音中 · 已收 ${withText} 段` + (q ? ` · 队列 ${q}` : '');
     }, 800);
-    setClockText('00:00');
-    elSegInfo.textContent = '正在听……';
+    setClockText(resume ? durationText() : '00:00');
+    elSegInfo.textContent = resume ? `继续录音 · 已 ${durationText()}` : '正在听……';
     updateModeChip();
     setEmotion('01');
     setTimeout(() => { if (running && !paused) setEmotion('16'); }, 700);
     updateStats();
+    if (resume) {
+      showBanner(opts.hint || `继续上次的录音（已 ${durationText()}），接着往后记。`);
+      persistSession();
+    }
   }
 
   function togglePause() {
@@ -2014,6 +3033,12 @@
     setEmotion('41');
     setTimeout(() => { if (!running) setEmotion('02'); }, 1200);
 
+    // 收尾期间先停掉自动补识别，并等它手上那一段处理完，避免同一段被两边重复识别
+    autoRecoverNextAt = Date.now() + 120000;
+    const waitRecoverAt = Date.now();
+    while (recoverBusy && Date.now() - waitRecoverAt < 15000) {
+      await sleep(200);
+    }
     // 存稿之后自动整理：完整讲稿 + 结构化笔记
     // 交给后台：把这一节的数组引用和待补识别音频一起打包，后台自己等、自己存
     const snapshotSource = segments;
@@ -2023,8 +3048,9 @@
     setView('jobs');
 
     persistSession();  // 保留恢复副本，直到服务端确认转写稿已经落盘
+    flushDraftSync();  // 收尾这一刻就把草稿写实，后面异步整理失败也不会丢
     finishSession(snapshotSource, pending, {
-      title: sessionTitle || defaultTitle(),
+      title: sessionTitle || pageTitle || defaultTitle(),
       duration: elClock.textContent,
       session: sessionId,
     });
@@ -2042,41 +3068,81 @@
     syncNotesButton();   // 本节内容还在内存里，允许再整理一次
   }
 
+  async function waitForLivePending(timeoutMs, onTick) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if (livePendingCount() === 0) break;
+      if (onTick) onTick(livePendingCount());
+      await sleep(250);
+    }
+    return { remaining: livePendingCount(), failed: failedPendingCount() };
+  }
+
+  function resumePendingFinish() {
+    if (!pendingFinish) return;
+    const p = pendingFinish;
+    pendingFinish = null;
+    finishSession(p.source, p.pending, p.meta, p.job);
+  }
+
   // 收尾：只吃「快照」，不碰全局状态，所以随时可以开下一节
-  async function finishSession(source, pending, meta) {
-    const job = startJob(meta.title);
+  async function finishSession(source, pending, meta, existingJob) {
+    meta = meta || {};
+    meta.title = meta.title || pageTitle || sessionTitle || defaultTitle();
+    meta.session = meta.session || sessionId;
+    const job = existingJob || startJob(meta.title);
+    updateJob(job, { status: 'running', detail: '等待最后几段识别…', draftTitle: meta.title, kind: job.kind || 'finish' });
     setView('jobs');
     setEmotion('37');                  // 复述回忆：开始保存并整理
     setTimeout(() => setEmotion('30'), 900);
 
-    // 后台先等最后几段回来（最多 3 秒），再取快照——不挡界面
-    if (inflight > 0 || fireQueue.length > 0) {
-      updateJob(job, { detail: '等待最后几段识别…' });
-      await drain(3000);
+    // 0) 还没传完的音频先等；服务挂着时最多等 45 秒，期间健康探测会把它拉回来
+    if (livePendingCount() > 0) {
+      const waited = await waitForLivePending(45000, (left) => {
+        updateJob(job, { detail: `还有 ${left} 段在补传，等本地服务…` });
+        if (serverDown) showBanner(`还有 ${left} 段没传完，正在等本地服务回来；服务恢复后会自动补传。`);
+      });
+      if (waited.remaining > 0) {
+        pendingFinish = { source, pending, meta, job };
+        updateJob(job, { detail: `还差 ${waited.remaining} 段没补传完，服务恢复后自动继续` });
+        showBanner(`还差 ${waited.remaining} 段没补传完，先不整理。服务恢复后会自动接着整理，别关这个页面。`);
+        notice(`还差 ${waited.remaining} 段没补传完，先没整理；服务恢复后会自动继续。`, '', 20000);
+        return;
+      }
     }
+
     const snapshot = (source || [])
       .filter((x) => (x.text || '').trim())
-      .map((x) => ({ seq: x.seq, time: x.time, text: x.text, tr: x.tr || '' }));
+      .map((x) => ({
+        seq: x.seq, at: x.at, time: x.time, text: x.text, tr: x.tr || '',
+        spk: spkLabels[String(x.seq)] || x.spk || 0,
+      }));
 
     // 1) 后台补识别：把存盘的音频转成文字，结果写进快照，不碰界面
+    let pendingFailed = 0;
     if (pending.length) {
       updateJob(job, { detail: `补识别 ${pending.length} 段…` });
       for (const item of pending) {
+        // 用户可能已经开了下一节：实时识别在排队时先让路，最多等 15 秒就继续
+        if (inflight > 0 || livePendingCount() > 0) {
+          updateJob(job, { detail: '等实时识别空闲…' });
+          await waitForTranscribeIdle(15000);
+        }
         try {
-          const res = await fetch('/api/transcribe-file', {
+          const data = await localJson('/api/transcribe-file', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session: meta.session, seq: item.seq, lang: currentLang }),
-          });
-          const data = await res.json().catch(() => ({}));
+          }, 65000);
           const text = (data.text || '').trim();
-          if (res.ok && !data.error && text) {
-            snapshot.push({ seq: item.seq, time: item.timeLabel, text, tr: '' });
+          if (text) {
+            snapshot.push({
+              seq: item.seq, at: item.at, time: item.timeLabel, text, tr: '',
+              spk: spkLabels[String(item.seq)] || 0,
+            });
           }
-        } catch (_) { /* 单段失败不影响整体 */ }
+        } catch (_) { pendingFailed += 1; /* 单段失败不影响整体，最后明确提示 */ }
       }
-      snapshot.sort((a, b) => (a.seq || 0) - (b.seq || 0));
-    snapshot.forEach((item) => { item.spk = spkLabels[String(item.seq)] || 0; });
     }
 
     if (!snapshot.length) {
@@ -2085,46 +3151,67 @@
       return;
     }
 
-    // 2) 存转写稿（连同截图清单一起存，重新整理时才不会丢图）
+    // 2) 当前页 + 未整理草稿合并，时间轴从最早一段重排
+    const mergedInfo = mergeForNotes(snapshot, meta.title);
+    const finalSegments = mergedInfo.segments;
+    const added = mergedInfo.added;
+    const duration = fmtClock((mergedInfo.durationSec || 0) * 1000);
+    if (added > 0) updateJob(job, { detail: `合并上次未整理的 ${added} 段…` });
+
+    // 3) 存转写稿（合并后的版本，连同截图清单一起存）
     updateJob(job, { detail: '保存转写稿…' });
-    // 刚按的快门可能还在上传，等它落盘再统计
     for (let guard = 0; guard < 40 && pendingShot; guard += 1) {
       await new Promise((r) => setTimeout(r, 150));
     }
-    const shotList = shots.map((x) => ({ sec: x.sec, name: x.name }));
+    const shotList = mergedInfo.shots || shots.map((x) => ({ sec: x.sec, name: x.name }));
     let saved = false;
     let saveRes = await postJsonRetry('/api/save',
-      { title: meta.title, duration: meta.duration, segments: snapshot, shots: shotList }, 4, 1500);
+      { title: meta.title, duration, segments: finalSegments, shots: shotList }, 4, 1500);
     if (!saveRes.ok && await waitForServer(45000)) {
       // 服务刚重启回来，再给一次机会
       saveRes = await postJsonRetry('/api/save',
-        { title: meta.title, duration: meta.duration, segments: snapshot, shots: shotList }, 2, 1500);
+        { title: meta.title, duration, segments: finalSegments, shots: shotList }, 2, 1500);
     }
     if (saveRes.ok) saved = !!saveRes.data.path;
+    if (saved) dirty = false;
 
     if (!saved) {
-      updateJob(job, { status: 'error', detail: '转写稿没存成（服务未响应）' });
+      updateJob(job, { status: 'error', detail: '转写稿没存成（服务未响应）', retryable: false });
       notice('稿子没存上，本地服务好像断了。刷新页面后这一节还在，重新点「结束并保存」即可。', '', 20000);
       return;
     }
+    const transcriptPath = saveRes.data.path;
 
     if (segments === source && !running) clearStored();
+    flushDraftSync();
 
     if (!notesReady) {
-      updateJob(job, { status: 'done', detail: '只存了转写稿（未配置 DeepSeek KEY）' });
-      notice('稿子存好啦，但没配钥匙，整理不了。', '', 15000);
+      updateJob(job, {
+        status: 'done', detail: '只存了转写稿（未配置 DeepSeek KEY）',
+        transcript: transcriptPath, draftTitle: meta.title,
+      });
+      notice('稿子存好啦，但没配钥匙，整理不了。草稿先留着，配好 KEY 再整理。', transcriptPath, 18000);
+      renderDraftBar();
       return;
     }
 
-    // 3) 整理讲稿 + 笔记
-    updateJob(job, { detail: '整理讲稿和笔记…', pct: 6 });
+    // 4) 整理讲稿 + 笔记：下一节正在录音时先等它的识别队列空闲（最多 30 秒），
+    //    等不到也照常整理，整理最终一定要跑完
+    if (inflight > 0 || livePendingCount() > 0) {
+      updateJob(job, { detail: '等实时识别空闲后再整理…', pct: 4 });
+      const idle = await waitForTranscribeIdle(30000, (n) => updateJob(job, {
+        detail: `等实时识别空闲（还有 ${n} 段）…`, pct: 4,
+      }));
+      if (!idle) updateJob(job, { detail: '实时识别还在排队，先整理已有内容…', pct: 5 });
+    }
+    updateJob(job, { detail: added > 0 ? `整理讲稿和笔记（含上次未整理 ${added} 段）…` : '整理讲稿和笔记…', pct: 6 });
     beginProgress('正在整理讲稿和笔记…');
     setEmotion('37');                  // 复述回忆：过一遍刚录的内容
     setTimeout(() => setEmotion('30'), 900);
     let out = null;
     try {
       out = await requestNotes({
-        title: meta.title, duration: meta.duration, segments: snapshot, shots: shotList,
+        title: meta.title, duration, segments: finalSegments, shots: shotList,
       }, (d) => {
         const text = progressText(d);
         const pct = progressPct(d);
@@ -2137,25 +3224,48 @@
 
     if (out && out.notes_path) {
       finishProgress('整理完成');
+      // 这节已经整理完：同 session 的草稿清掉；没有别的后台任务占着同名草稿时，按标题兜底全清
+      removeDraft(meta.title, meta.session || sessionId);
+      if (!backgroundJobFor(meta.title)) removeDraft(meta.title);
+      pageCurated = true;
+      restoredSameSession = false;
       updateJob(job, {
-        status: 'done', detail: '讲稿和笔记都已生成', pct: 100,
-        article: out.article_path, notes: out.notes_path,
+        status: 'done', pct: 100,
+        detail: added > 0 ? `讲稿和笔记都已生成（含上次未整理 ${added} 段）` : '讲稿和笔记都已生成',
+        article: out.article_path, notes: out.notes_path, transcript: transcriptPath,
       });
       setEmotion('33');
-      notice(pickDoneLine(), out.notes_path, 25000);
+      const doneText = pickDoneLine() + (added > 0 ? ` 上次没整理的 ${added} 段也一起整理了。` : '');
+      if (markJobNotified(job.id)) notice(doneText, out.notes_path, 25000);
       setTimeout(() => { if (!running) setEmotion('02'); }, 4000);
-      elFoot.textContent = '上一节处理完了：点气泡，或到「处理」里看。';
+      elFoot.textContent = added > 0
+        ? `已把上次未整理的 ${added} 段一起整理。点气泡，或到「处理」里看。`
+        : '上一节处理完了：点气泡，或到「处理」里看。';
+      const others = otherDraftTitles(meta.title);
+      if (others.length) {
+        setTimeout(() => showBanner(`另有《${others[0].title}》的 ${draftCount(others[0])} 段不是这门课，先留着没合并。`), 1200);
+      }
+      renderDraftBar();
     } else {
       clearGlobalProgress();
-      updateJob(job, { status: 'error', detail: '整理没成，转写稿已保存', pct: 100 });
+      restoredSameSession = false;    // 没整理成，这节的草稿要让人看见并能重试
+      updateJob(job, {
+        status: 'error', pct: 100,
+        detail: '整理没成，转写稿已保存，未整理草稿还在',
+        transcript: transcriptPath, draftTitle: meta.title, retryable: true,
+      });
       if (serverDown) {
-        notice('本地服务重启中，稿子已经存好了。等服务回来后到「处理」里点「重新整理」。', '', 25000);
+        notice('本地服务重启中，稿子已经存好了；草稿也留着，服务恢复正常后到「处理」里点重试。', '', 25000);
       } else {
-        notice('整理没成，但转写稿已经存下来了。到「处理」里找到这一节，点右侧「重新整理」就能再来一次。', '', 25000);
+        notice('整理没成，但转写稿存了，未整理草稿也留着。到「处理」里点「重试整理」就能再来一次。', '', 25000);
       }
       setEmotion('34');
+      renderDraftBar();
     }
-      setTimeout(() => setEmotion('15'), 2400);
+    if (pendingFailed) {
+      setTimeout(() => showBanner(`另外有 ${pendingFailed} 段补识别没成功，没进这份稿子。`), 800);
+    }
+    setTimeout(() => setEmotion('15'), 2400);
   }
 
   async function saveSession() {
@@ -2385,8 +3495,9 @@
   }
 
   async function generateNotes(opts = {}) {
-    const usable = segments.filter((s) => (s.text || '').trim())
-      .slice().sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    const notesTitle = pageTitle || sessionTitle || (latestDraft() && latestDraft().title) || defaultTitle();
+    const mergedInfo = mergeForNotes(segments, notesTitle);
+    const usable = mergedInfo.segments;
     if (!usable.length) { showBanner('还没有转写内容。'); return; }
 
     // 手动点「生成」时页面上的稿子可能还没落盘，先存一份，避免之后点开始就丢
@@ -2416,12 +3527,13 @@
     btnNotes.textContent = '整理中…';
     try {
       const data = await requestNotes({
-        title: `课堂 ${new Date().toLocaleDateString('zh-CN')}`,
-        duration: durationText(),
+        title: notesTitle,
+        duration: fmtClock((mergedInfo.durationSec || 0) * 1000),
         segments: usable.map((seg) => ({
-          time: seg.time, text: seg.text, spk: spkLabels[String(seg.seq)] || 0,
+          time: seg.time, text: seg.text, tr: seg.tr || '',
+          spk: Number(seg.spk) || spkLabels[String(seg.seq)] || 0,
         })),
-        shots: shots.map((x) => ({ sec: x.sec, name: x.name })),
+        shots: mergedInfo.shots || shots.map((x) => ({ sec: x.sec, name: x.name })),
       }, null, job);
       const res = { ok: true, status: 200 };
       if (!res.ok || data.error) {
@@ -2439,8 +3551,15 @@
       lastArticle = data.article || '';
       lastNotesPath = data.notes_path || '';
       lastArticlePath = data.article_path || '';
+      removeDraft(notesTitle);
+      pageCurated = true;
+      dirty = false;
+      renderDraftBar();
       updateJob(job, {
-        status: 'done', detail: '讲稿和笔记已生成',
+        status: 'done',
+        detail: mergedInfo.added > 0
+          ? `讲稿和笔记已生成（含上次未整理 ${mergedInfo.added} 段）`
+          : '讲稿和笔记已生成',
         article: data.article_path, notes: data.notes_path,
       });
       const artTab = tabs.find((t) => t.dataset.tab === 'article');
@@ -2456,9 +3575,11 @@
       setEmotion('33');
       setTimeout(() => { if (!running) setEmotion('02'); }, 4000);
       if (opts.auto) return data;              // 后台整理：不打断当前界面
-      elFoot.textContent = data.where === 'obsidian'
-        ? '两份文件已进 Obsidian 收件箱，30 分钟内自动归档。'
-        : '已存到本地 sessions/，检查设置里的收件箱路径。';
+      elFoot.textContent = mergedInfo.added > 0
+        ? `已把上次未整理的 ${mergedInfo.added} 段一起整理，文件已落盘。`
+        : (data.where === 'obsidian'
+          ? '两份文件已进 Obsidian 收件箱，30 分钟内自动归档。'
+          : '已存到本地 sessions/，检查设置里的收件箱路径。');
       elSegInfo.textContent = `共 ${segments.length} 段`;
     } catch (err) {
       updateJob(job, { status: 'error', detail: err.message.slice(0, 60) });
@@ -2629,13 +3750,20 @@
   let configLoaded = false;
   let configRetryTimer = null;
 
+  // 配置加载时只清「连不上/配置」类提示，别把「已接回上次记录」「服务已恢复」顺手抹掉
+  function clearStaleConfigBanner() {
+    const t = (elBanner.textContent || '').trim();
+    if (!t) return;
+    if (/KEY|配置|连不上|没连上|本地服务|file:\/\/|服务没响应/.test(t)) hideBanner();
+  }
+
   async function loadConfig() {
     if (window.__BOOT_CONFIG) {
       // 页面里已经带了配置：直接用，不发请求
       configFailures = 0;
       configLoaded = true;
       clearInterval(configRetryTimer);
-      hideBanner();
+      clearStaleConfigBanner();
       applyConfig(window.__BOOT_CONFIG);
       return;
     }
@@ -2652,7 +3780,7 @@
       configFailures = 0;
       configLoaded = true;
       clearInterval(configRetryTimer);
-      hideBanner();
+      clearStaleConfigBanner();
       applyConfig(cfg);
     } catch (err) {
       console.error('[loadConfig] 失败：', err && (err.stack || err.message || err));
@@ -2812,9 +3940,41 @@
     btnMain.addEventListener('click', () => {
       if (mainState === 'busy') return;
       if (mainState === 'recording') { stop(); return; }
-      start();
+      requestStart();
     });
   }
+
+  // 开始前「继续 / 后台整理 / 清理」三选一
+  (function initResumeModal() {
+    const layer = $('resumeModal');
+    const close = $('btnResumeClose');
+    const cont = $('btnResumeContinue');
+    const bg = $('btnResumeBackground');
+    const clean = $('btnResumeClean');
+    if (close) close.addEventListener('click', closeResumeModal);
+    if (cont) cont.addEventListener('click', doResumeContinue);
+    if (bg) bg.addEventListener('click', doResumeBackground);
+    if (clean) clean.addEventListener('click', doResumeClean);
+    if (layer) {
+      layer.addEventListener('click', (e) => {
+        if (e.target === layer) closeResumeModal();
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !layer.classList.contains('hidden')) {
+          e.preventDefault();
+          if (!resumeBusy) closeResumeModal();
+        }
+      });
+    }
+  })();
+
+  // 顶部草稿条：可直接整理，也可打开三选一继续录
+  (function initDraftBar() {
+    const org = $('btnDraftOrganize');
+    const cont = $('btnDraftContinue');
+    if (org) org.addEventListener('click', organizeDraftFromBar);
+    if (cont) cont.addEventListener('click', resumeDraftFromBar);
+  })();
   if (btnPause) btnPause.classList.add('is-collapsed');
   btnPause.addEventListener('click', togglePause);
   document.addEventListener('visibilitychange', () => {
@@ -2944,6 +4104,27 @@
     try { localStorage.setItem(JOBS_KEY, JSON.stringify(jobs.slice(0, 30))); } catch (_) {}
   }
 
+  // 「后台整理完成」只提示一次：job id 写进 localStorage，刷新后不再重放
+  const NOTIFIED_KEY = 'lt:notifiedJobs';
+  function notifiedJobIds() {
+    try {
+      const list = JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '[]');
+      return Array.isArray(list) ? list : [];
+    } catch (_) { return []; }
+  }
+  function isJobNotified(id) {
+    return id != null && notifiedJobIds().includes(id);
+  }
+  // 第一次提示返回 true；已经提示过返回 false
+  function markJobNotified(id) {
+    if (id == null) return true;
+    const list = notifiedJobIds();
+    if (list.includes(id)) return false;
+    list.push(id);
+    try { localStorage.setItem(NOTIFIED_KEY, JSON.stringify(list.slice(-60))); } catch (_) {}
+    return true;
+  }
+
   function loadJobs() {
     try {
       const raw = localStorage.getItem(JOBS_KEY);
@@ -3007,6 +4188,7 @@
 
     if (!jobs.length) {
       listEl.innerHTML = '';
+      refreshBackgroundStatus();
       return;
     }
 
@@ -3033,6 +4215,9 @@
       const links = [];
       if (j.article) links.push(`<button data-doc="${encodeURIComponent(j.article)}">完整原文</button>`);
       if (j.notes) links.push(`<button data-doc="${encodeURIComponent(j.notes)}">AI 笔记</button>`);
+      if (j.status === 'error' && j.draftTitle) {
+        links.push(`<button class="retry-bg" data-retry="${j.id}">重试整理</button>`);
+      }
       const target = j.notes || j.article || '';
       const docAttr = target ? ` data-doc="${encodeURIComponent(target)}"` : '';
 
@@ -3055,6 +4240,7 @@
         + `<span class="jd">${detail}</span>`
         + '</div>';
     }).join('');
+    refreshBackgroundStatus();
   }
 
   function startJob(title) {
@@ -3070,6 +4256,127 @@
     // 任务收尾（完成/失败）：文件已经落盘，正在看处理页就立刻刷
     if (patch.status === 'done' || patch.status === 'error') {
       if (currentView === 'jobs') loadFiles();
+    }
+  }
+
+  // 底部状态行：后台任务不占录音界面，但要一直能看见
+  let bgDoneShownThisLoad = false;
+  function refreshBackgroundStatus() {
+    const el = $('bgJobStatus');
+    if (!el) return;
+    const runningBg = jobs.filter((j) => j.status === 'running' && j.kind === 'background');
+    if (runningBg.length) {
+      el.textContent = '后台整理中：' + runningBg.slice(0, 2).map((j) => `《${j.draftTitle || j.title}》`).join('')
+        + (runningBg.length > 2 ? ` 等 ${runningBg.length} 个` : '');
+      el.classList.remove('hidden', 'ok');
+      el.classList.add('busy');
+      return;
+    }
+    const last = jobs.find((j) => j.kind === 'background' && j.status === 'done' && j.notes);
+    // 完成文案只报一次：第一次显示就写进 lt:notifiedJobs；本次页面内保持可见，刷新后不再出现
+    if (last && (bgDoneShownThisLoad || !isJobNotified(last.id)) && Date.now() - (last.ts || 0) < 6 * 3600 * 1000) {
+      markJobNotified(last.id);
+      bgDoneShownThisLoad = true;
+      el.textContent = `后台整理完成：${last.draftTitle || last.title}，到「处理」里看`;
+      el.classList.remove('hidden', 'busy');
+      el.classList.add('ok');
+      return;
+    }
+    el.classList.add('hidden');
+    el.classList.remove('busy', 'ok');
+  }
+
+  async function submitBackgroundNotes(info, job) {
+    const id = 'j' + window.crypto.randomUUID();
+    const payload = {
+      title: info.title,
+      duration: fmtClock((info.durationSec || 0) * 1000),
+      segments: (info.merged || []).map((s) => ({
+        time: s.time, text: s.text, tr: s.tr || '', spk: Number(s.spk) || 0,
+      })),
+      shots: info.shots || [],
+      job: id,
+      background: true,
+    };
+    updateJob(job, { detail: '提交后台整理…', pct: 1 });
+    let lastErr = null;
+    // 同一个 job id 重复提交是幂等的（服务端按内容指纹去重），断网重试不会生成两个任务
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const data = await localJson('/api/notes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }, 15000);
+        if (data && (data.accepted || data.job)) return id;
+        throw new Error(data && data.error ? data.error : '提交没有返回任务号');
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 0) await sleep(1200);
+      }
+    }
+    throw lastErr || new Error('提交后台整理失败');
+  }
+
+  async function watchBackgroundJob(job, serverJob, title) {
+    try {
+      const result = await pollNotesTask(serverJob, (d) => {
+        const text = progressText(d);
+        const pct = progressPct(d);
+        if (text && pct != null) updateJob(job, { detail: text, pct });
+        else if (text) updateJob(job, { detail: text });
+      });
+      removeDraft(title, job.draftSessionId);
+      updateJob(job, {
+        status: 'done', pct: 100,
+        detail: '讲稿和笔记已生成',
+        article: result.article_path, notes: result.notes_path,
+      });
+      renderDraftBar();
+      if (markJobNotified(job.id)) notice(`《${title}》整理好了。`, result.notes_path, 25000);
+    } catch (err) {
+      updateJob(job, {
+        status: 'error', pct: 100,
+        detail: '整理失败：' + String(err.message || err).slice(0, 50),
+        retryable: true, draftTitle: title,
+      });
+      renderDraftBar();
+      notice(`《${title}》整理失败，草稿还在；到「处理」里点「重试整理」。`, '', 22000);
+    }
+  }
+
+  async function retryDraftJob(job) {
+    if (!job || job.status === 'running') return;
+    const title = job.draftTitle || job.title.replace(/^后台整理\s*/, '');
+    const d = draftFor(title, job.draftSessionId) || draftFor(title);
+    if (!d || !draftCount(d)) {
+      showBanner('这份草稿已经不在了，到「处理」里用转写稿重新整理。');
+      return;
+    }
+    const merged = mergeForNotes([], title, d);
+    const info = {
+      title,
+      draft: d,
+      durationSec: Math.max(Number(d.recordedSec) || 0, merged.durationSec || 0),
+      merged: merged.segments,
+      shots: merged.shots || d.shots || [],
+    };
+    job.status = 'running';
+    job.detail = '重新提交后台整理…';
+    job.serverJob = '';
+    job.retryable = false;
+    job.draftSessionId = job.draftSessionId || d.sessionId;
+    renderJobs();
+    try {
+      const id = await submitBackgroundNotes(info, job);
+      updateJob(job, { serverJob: id, detail: '后台整理中…', pct: 2 });
+      watchBackgroundJob(job, id, title);
+    } catch (err) {
+      updateJob(job, {
+        status: 'error', detail: '提交失败：' + String(err.message || err).slice(0, 50),
+        retryable: true, draftTitle: title,
+      });
+      showBanner('后台整理没提交上，稍后再点「重试整理」。');
     }
   }
 
@@ -3724,12 +5031,28 @@
   async function resumeNotesJob(job) {
     try {
       const data = await pollNotesTask(job.serverJob, (d) => {
-        updateJob(job, { detail: progressText(d) || '正在整理…', pct: progressPct(d) });
+        const text = progressText(d);
+        const pct = progressPct(d);
+        if (text && pct != null) updateJob(job, { detail: text, pct });
+        else if (text) updateJob(job, { detail: text });
       });
+      if (job.draftTitle) removeDraft(job.draftTitle, job.draftSessionId);
       updateJob(job, { status: 'done', detail: '讲稿和笔记都已生成', pct: 100,
         article: data.article_path, notes: data.notes_path });
+      renderDraftBar();
+      if (job.kind === 'background' && markJobNotified(job.id)) {
+        notice(`《${job.draftTitle || job.title}》整理好了。`, data.notes_path, 25000);
+      }
     } catch (err) {
-      updateJob(job, { status: 'error', detail: err.message });
+      updateJob(job, {
+        status: 'error',
+        detail: '整理失败：' + String(err.message || err).slice(0, 50),
+        retryable: !!job.draftTitle, draftTitle: job.draftTitle,
+      });
+      renderDraftBar();
+      if (job.kind === 'background') {
+        notice(`《${job.draftTitle || job.title}》整理失败，草稿还在；到「处理」里点「重试整理」。`, '', 22000);
+      }
     }
   }
 
@@ -4383,9 +5706,14 @@
   const serverAlertText = $('serverAlertText');
   const btnServerReload = $('btnServerReload');
 
+  const SERVER_PING_OK_MS = 3000;     // 服务正常：3 秒一次
+  const SERVER_PING_DOWN_MS = 1000;   // 一旦失败：1 秒一次，服务回来能立刻续上
   let serverDown = false;
   let serverDownAt = 0;
+  let serverDownLong = false;
   let serverPingTimer = null;
+  let serverPingBusy = false;
+  let healthDelay = SERVER_PING_OK_MS;
 
   // 进度条状态：不确定进度（0-100 未知）+ 已用时间，让人看得出还在动
   const gpState = { pct: null, text: '', indet: true, t0: 0, ticker: null };
@@ -4466,6 +5794,121 @@
     if (serverAlert) serverAlert.classList.add('hidden');
   }
 
+  // ---------------------------------------------------------------- 生命周期
+  // 「打开软件 = 起服务，点停止/关窗口 = 全停」：前端只管按钮、状态和关窗通知
+
+  function setServiceStopped(on, msg) {
+    serviceStopped = !!on;
+    document.body.classList.toggle('service-stopped', serviceStopped);
+    ['btnMain', 'btnPause', 'btnNotes', 'btnCopy',
+      'btnDraftOrganize', 'btnDraftContinue', 'btnBackfill', 'btnRecover'].forEach((id) => {
+      const el = $(id);
+      if (el) el.disabled = serviceStopped;
+    });
+    if (serviceStopped) {
+      showServerAlert(msg || '服务已停止，可以关闭窗口', 'failed');
+      showBanner(msg || '服务已停止，可以关闭窗口');
+      if (btnServerReload) btnServerReload.classList.add('hidden');   // 服务回来会自己恢复，不用手动刷新
+    } else {
+      hideServerAlert();
+      if (msg) showBanner(msg);
+      syncNotesButton();
+    }
+  }
+
+  let lifecycleTimer = null;
+  let lifecycleUnsupported = false;
+
+  async function checkLifecycle() {
+    if (lifecycleUnsupported) return null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3000);
+    try {
+      const res = await fetch('/api/lifecycle', { signal: ctrl.signal, cache: 'no-store' });
+      if (res.status === 404 || res.status === 501) { lifecycleUnsupported = true; return null; }
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data || data.managed === false) return null;
+      // 后端可能在重启后残留旧的 stop.flag：只要进程还活着且没在退出（exiting=false），
+      // 就说明这是上一轮的停止标记，按「服务可用」处理，避免把活服务锁死。
+      const staleFlag = !!data.stop_flag && data.exiting === false;
+      const stopping = !!data.stop_flag && !staleFlag;
+      if (stopping) {
+        if (!serviceStopped) setServiceStopped(true, '服务已停止，可以关闭窗口');
+      } else if (serviceStopped) {
+        setServiceStopped(false, '服务已恢复，可以继续使用。');
+      }
+      return data;
+    } catch (_) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function startLifecycleWatch() {
+    if (lifecycleTimer) return;
+    lifecycleTimer = setInterval(() => { if (!document.hidden) checkLifecycle(); }, 4000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) checkLifecycle(); });
+    checkLifecycle();
+  }
+
+  // 关窗口即停：sendBeacon 通知服务端（服务端有 6 秒宽限，重新打开会取消）。
+  // 不做定时器轮询判断，浏览器后台会把定时器节流。
+  let closedBeaconSent = false;
+  function notifyClientClosed() {
+    if (closedBeaconSent) return;
+    closedBeaconSent = true;
+    try {
+      const body = new Blob([JSON.stringify({ at: Date.now() })], { type: 'text/plain' });
+      if (!(navigator.sendBeacon && navigator.sendBeacon('/api/client-closed', body))) {
+        fetch('/api/client-closed', {
+          method: 'POST', body: '1', keepalive: true,
+          headers: { 'Content-Type': 'text/plain' },
+        }).catch(() => {});
+      }
+    } catch (_) { /* 通知失败不能挡着关窗口 */ }
+  }
+  window.addEventListener('pagehide', notifyClientClosed);
+  window.addEventListener('beforeunload', notifyClientClosed);
+  window.addEventListener('pageshow', () => {
+    closedBeaconSent = false;      // 从 bfcache 回来：重新通知/重新查状态
+    checkLifecycle();
+  });
+
+  async function shutdownService() {
+    if (!window.confirm('停止后录音和整理都会中断，确定吗？')) return;
+    const btn = $('btnShutdown');
+    if (btn) btn.disabled = true;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      let res;
+      try {
+        res = await fetch('/api/shutdown', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
+      if (!res.ok || data.ok === false) {
+        throw new Error(data.error || (res.status === 404 ? '这台服务还不支持停止（接口没上线）' : `HTTP ${res.status}`));
+      }
+      setServiceStopped(true, '服务已停止，可以关闭窗口');
+      setTimeout(() => { try { window.close(); } catch (_) {} }, 300);
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      const why = err && err.name === 'AbortError' ? '服务没有响应' : String((err && err.message) || err);
+      showBanner(`停止服务失败：${why}。可以关掉窗口或结束进程再重开。`);
+      notice(`停止服务失败：${why}`, '', 12000);
+    }
+  }
+
   // 轻量探活：只看本地服务，不调用外部接口
   async function pingServer(timeoutMs = 2500) {
     const ctrl = new AbortController();
@@ -4489,33 +5932,106 @@
     return false;
   }
 
+  // 服务断开时把正在飞的请求全部掐掉：它们已经不可能成功，留着只会堵队列
+  function abortActiveUploads() {
+    uploadEpoch += 1;
+    inflight = 0;
+    fireQueue.forEach((it) => {
+      if (it.state === 'uploading') {
+        it.state = 'queued';
+        try { it.ctrl && it.ctrl.abort(); } catch (_) {}
+      }
+    });
+    updateModeChip();
+  }
+
+  function onServerLost() {
+    serverDown = true;
+    serverOkSince = 0;
+    serverDownAt = Date.now();
+    serverDownLong = false;
+    healthDelay = SERVER_PING_DOWN_MS;
+    showServerAlert(serviceStopped ? '服务已停止，可以关闭窗口' : '暂时无法连接本地服务，正在自动重连…',
+      serviceStopped ? 'failed' : '');
+    if (serviceStopped && btnServerReload) btnServerReload.classList.add('hidden');
+    abortActiveUploads();
+    if (pendingFinish) {
+      updateJob(pendingFinish.job, { detail: '服务断开，等恢复后继续收尾…' });
+    }
+  }
+
+  function onServerUp() {
+    const wasDown = serverDown;
+    serverDown = false;
+    serverDownLong = false;
+    pingFailStreak = 0;
+    healthDelay = SERVER_PING_OK_MS;
+    serverOkSince = Date.now();
+    failStreak = 0;               // 服务回来了，旧的失败计数清零，避免一次抖动就再次降级
+    // 服务刚回来：deferred 的存盘从这一刻起算「连续正常 10 秒」再自动补
+    autoRecoverFails = 0;
+    autoRecoverNextAt = Date.now() + AUTO_RECOVER_GRACE_MS;
+    if (serviceStopped) setServiceStopped(false, '服务已恢复，可以继续使用。');
+    if (!wasDown) { checkLifecycle(); return; }
+    // 重置卡住的 inflight；旧请求的 finally 会因为 epoch 对不上而自动跳过
+    uploadEpoch += 1;
+    inflight = 0;
+    const waiting = fireQueue.filter((it) => it.state !== 'done' && it.state !== 'failed');
+    waiting.forEach((it) => { if (it.state !== 'done') it.state = 'queued'; });
+    waiting.sort((a, b) => (a.seq - b.seq) || (a.uid - b.uid));
+    if (waiting.length) {
+      recoveryBusy = true;
+      showServerAlert(`服务已恢复，正在补传 ${waiting.length} 段`, 'recovered');
+      showBanner(`服务已恢复，正在补传 ${waiting.length} 段…`);
+    } else if (mode === 'deferred' && stored.length) {
+      showServerAlert('服务已恢复', 'recovered');
+      showBanner(`服务已恢复，10 秒后自动补识别 ${stored.length} 段…`);
+    } else {
+      showServerAlert('服务已恢复', 'recovered');
+      showBanner('服务已恢复，可以继续使用。');
+    }
+    updateModeChip();
+    updateRecoverBtn();
+    pump();
+    setTimeout(() => { if (!serverDown && !serviceStopped) hideServerAlert(); }, waiting.length ? 6000 : 2600);
+    afterUploadSettled();
+    checkLifecycle();
+  }
+
   function startServerWatch() {
     if (serverPingTimer) return;
-    let checking = false;
-    let failures = 0;
-    serverPingTimer = setInterval(async () => {
-      if (document.hidden || checking) return;
-      checking = true;
-      try {
-        const ok = await pingServer();
-        failures = ok ? 0 : failures + 1;
-        if (!ok && failures < 3) return;
-        if (!ok && !serverDown) {
-          serverDown = true;
-          serverDownAt = Date.now();
-          showServerAlert('暂时无法连接本地服务，正在自动重连…');
-        } else if (ok && serverDown) {
-          serverDown = false;
-          showServerAlert('服务已恢复，正在继续查询处理结果', 'recovered');
-          renderProgress();
-          setTimeout(() => { if (!serverDown) hideServerAlert(); }, 2600);
-        } else if (!ok && serverDown && Date.now() - serverDownAt > 45000) {
-          showServerAlert('本地服务仍未响应，正在重连；若窗口已退出，请重新启动程序', 'failed');
-        }
-      } finally {
-        checking = false;
+    healthDelay = SERVER_PING_OK_MS;
+    const tick = async () => {
+      if (serverPingBusy) {
+        serverPingTimer = setTimeout(tick, healthDelay);
+        return;
       }
-    }, 3000);
+      serverPingBusy = true;
+      let ok = false;
+      try { ok = await pingServer(2500); } finally { serverPingBusy = false; }
+      if (ok) {
+        pingFailStreak = 0;
+        if (!serverOkSince) serverOkSince = Date.now();
+        if (serverDown) onServerUp();
+        else healthDelay = SERVER_PING_OK_MS;
+      } else {
+        pingFailStreak += 1;
+        serverOkSince = 0;
+        healthDelay = SERVER_PING_DOWN_MS;
+        if (!serverDown) {
+          // 连续两次探活失败才报断开：单次抖动、页面刚醒过来不算
+          if (pingFailStreak >= 2) onServerLost();
+        } else if (!serverDownLong && Date.now() - serverDownAt > 45000) {
+          serverDownLong = true;
+          showServerAlert(serviceStopped
+            ? '服务已停止，可以关闭窗口'
+            : '本地服务仍未响应，正在重连；若窗口已退出，请重新启动程序', 'failed');
+          if (serviceStopped && btnServerReload) btnServerReload.classList.add('hidden');
+        }
+      }
+      serverPingTimer = setTimeout(tick, healthDelay);
+    };
+    serverPingTimer = setTimeout(tick, 500);
   }
 
   if (btnServerReload) {
@@ -4802,6 +6318,8 @@
     if (e.key === 'Escape' && !$('modal').classList.contains('hidden')) $('modal').classList.add('hidden');
   });
   $('btnSaveCfg').addEventListener('click', saveConfig);
+  const shutdownBtn = $('btnShutdown');
+  if (shutdownBtn) shutdownBtn.addEventListener('click', shutdownService);
   $('btnCopyNotes').addEventListener('click', copyNotes);
   // 笔记弹窗：Word / PDF / HTML
   ['btnDownloadNotes', 'btnDownloadPdf', 'btnDownloadHtml'].forEach((id) => {
@@ -4820,7 +6338,21 @@
       if (hit) exportDoc(hit.dataset.dl, historyDocPath);
     });
   }
-  btnRecover.addEventListener('click', () => { recoverStored(); });
+  btnRecover.addEventListener('click', async () => {
+    if (recoverBusy) return;
+    const ok = await recoverStored({ manual: true });
+    if (!ok) {
+      // 手动也没成：保持 deferred，按自动退避继续，并明确说原因
+      autoRecoverFails = Math.max(1, autoRecoverFails);
+      const wait = autoRecoverFails <= 1 ? 10000 : 30000;
+      autoRecoverNextAt = Date.now() + wait;
+      showRecoverFailure(wait);
+      updateModeChip();
+      updateRecoverBtn();
+    } else if (mode === 'deferred' && stored.length) {
+      autoRecoverNextAt = Date.now() + 1000;
+    }
+  });
 
   const ballDock = $('ballDock');
   if (ballDock) {
@@ -4882,6 +6414,14 @@
   const jobsListEl = $('jobsList');
   if (jobsListEl) {
     jobsListEl.addEventListener('click', (e) => {
+      const retry = e.target.closest('button[data-retry]');
+      if (retry) {
+        e.preventDefault();
+        e.stopPropagation();
+        const job = jobs.find((j) => String(j.id) === String(retry.dataset.retry));
+        if (job) retryDraftJob(job);
+        return;
+      }
       const btn = e.target.closest('button[data-doc]');
       if (btn) { openDoc(decodeURIComponent(btn.dataset.doc)); return; }
       const card = e.target.closest('.job-card[data-doc]');
@@ -4928,6 +6468,8 @@
   loadStats();
   initBubbleSound();
   startServerWatch();
+  startAutoRecoverWatch();
+  startLifecycleWatch();
   loadJobs();
   jobs.filter((job) => job.status === 'running' && job.serverJob).forEach(resumeNotesJob);
   renderJobs();
@@ -5662,14 +7204,59 @@
   if (location.search.includes('bubbleanim=off')) document.body.classList.add('no-anim');
   if (location.search.includes('persp=near')) document.body.classList.add('persp-near-tail');
 
+  loadDrafts();
   const restored = restoreSession();
   updateStats();
   if (!ball) initBall();
   loadConfig();
+  renderDraftBar();
+  refreshBackgroundStatus();
   if (restored) {
-    showBanner(`接回了上次没整理的 ${restored} 段转写稿。可以直接点「生成笔记」，或点「开始听课」开新的一节。`);
+    // 这是同一节被接回来，不是「上次没整理的另一节」：别吓人
+    const d = draftFor(pageTitle, sessionId);
+    const extraN = d ? draftCount(d) : 0;
+    const extra = extraN > restored ? `（含草稿共 ${extraN} 段）` : '';
+    showBanner(`已接回上次的记录（${restored} 段）${extra}，可以接着录或直接生成笔记。`);
     syncNotesButton();
+  } else {
+    const ld = draftStore.drafts
+      .filter((x) => draftCount(x) > 0 && !draftIsCurrent(x))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0] || null;
+    // 这份已经在后台整理：底部有「后台整理中」，别再喊一次「没整理」
+    if (ld && !backgroundJobFor(ld.title)) {
+      showBanner(`上次还有 ${draftCount(ld)} 段没整理（《${ld.title}》），点上面的提示可以直接整理，或点「开始听课」接着录。`);
+    }
   }
+
+  // 自测 / 自动化检查用：只读的状态，不改变任何业务流程
+  window.__ltDebug = {
+    state: () => ({
+      running, paused, mainState, serverDown, healthDelay, serviceStopped,
+      restoredSameSession, inflight, pending: livePendingCount(), failed: failedPendingCount(),
+      pendingFinish: !!pendingFinish, recoveryBusy,
+      sessionId, sessionBaseAt, seqNo, recordedSec,
+      pageTitle, pageCurated, segments: segments.length,
+      mode, storedCount: stored.length, autoRecovering,
+      autoRecoverFails, autoRecoverNextIn: autoRecoverNextAt ? Math.max(0, autoRecoverNextAt - Date.now()) : 0,
+      serverOkFor: serverOkSince ? Date.now() - serverOkSince : -1,
+      lastRecoverErr, recoverBusy,
+      recoverLog: recoverLog.map((x) => ({ ...x })),
+      draftBar: ($('draftBar') && !$('draftBar').classList.contains('hidden')) ? ($('draftBarText') || {}).textContent : '',
+      banner: ($('banner') && !$('banner').classList.contains('hidden')) ? $('banner').textContent : '',
+      serverAlert: ($('serverAlert') && !$('serverAlert').classList.contains('hidden')) ? ($('serverAlertText') || {}).textContent : '',
+      bgStatus: ($('bgJobStatus') && !$('bgJobStatus').classList.contains('hidden')) ? $('bgJobStatus').textContent : '',
+      draftTitles: draftStore.drafts.map((d) => ({ title: d.title, count: draftCount(d), sessionId: d.sessionId })),
+    }),
+    pending: () => fireQueue.map((it) => ({
+      seq: it.seq, state: it.state, attempts: it.attempts, at: it.at,
+      hasText: !!(it.rec && (it.rec.text || '').trim()),
+    })),
+    drafts: () => draftStore.drafts.map((d) => ({
+      title: d.title, count: draftCount(d), sessionId: d.sessionId,
+      recordedSec: d.recordedSec, firstAt: d.segments[0] && d.segments[0].at,
+      segments: d.segments.map((s) => ({ at: s.at, time: s.time, text: s.text })),
+    })),
+  };
 
   // 自测用：浏览器带假麦克风时，?selftest=1 直接开录，用来回归验证界面
   if (location.search.includes('selftest=1')) {

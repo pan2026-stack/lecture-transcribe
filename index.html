@@ -55,6 +55,15 @@
 
     <div class="banner hidden" id="banner"></div>
 
+    <div class="draft-bar hidden" id="draftBar">
+      <span class="db-dot" aria-hidden="true"></span>
+      <span class="db-text" id="draftBarText"></span>
+      <span class="db-actions" id="draftBarActions">
+        <button type="button" class="db-btn primary" id="btnDraftOrganize">直接整理</button>
+        <button type="button" class="db-btn" id="btnDraftContinue">继续录</button>
+      </span>
+    </div>
+
     <button class="key-tip hidden" id="keyTip" type="button"></button>
 
   <div class="camera-panel hidden" id="cameraPanel">
@@ -156,6 +165,7 @@
 
         <div class="foot">
           <span id="footInfo">录音在本机切片后只发给识别接口，两个 KEY 都存在本机 config.json。</span>
+          <span class="bg-job-status hidden" id="bgJobStatus"></span>
           <span class="saved hidden" id="savedPath"></span>
         </div>
       </div>
@@ -256,6 +266,31 @@
       <div class="cfg-acts">
         <button class="ghost" id="btnCourseCancel" type="button">取消</button>
         <button class="btn-primary" id="btnCourseGo" type="button">开始听课</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 有未整理内容时，开始前先问一句 -->
+<div class="modal-layer hidden" id="resumeModal">
+  <div class="modal-box course-box resume-box" role="dialog" aria-modal="true" aria-labelledby="resumeTitle">
+    <div class="cfg-head">
+      <div>
+        <h2 class="modal-title" id="resumeTitle">上次还有 0 段没整理</h2>
+        <p class="modal-hint" id="resumeSub">继续录音会接在后面；另外两个选项会先存一份转写稿。</p>
+      </div>
+      <button class="cfg-close" id="btnResumeClose" type="button" aria-label="取消开始">×</button>
+    </div>
+    <div class="resume-body">
+      <p class="resume-note">「继续录音」会接着上次的时间轴和发言人往下记；「后台整理并开始新课」会先把上次存成转写稿并提交整理，再开新的一节；「清理后开始」只存转写稿，不整理。</p>
+      <p class="resume-error hidden" id="resumeError"></p>
+    </div>
+    <div class="cfg-foot">
+      <span class="cfg-foot-note">关闭 = 取消开始，什么都不动</span>
+      <div class="cfg-acts resume-acts">
+        <button class="btn-primary" id="btnResumeContinue" type="button">继续录音</button>
+        <button class="btn-secondary" id="btnResumeBackground" type="button">后台整理并开始新课</button>
+        <button class="btn-danger" id="btnResumeClean" type="button">清理后开始</button>
       </div>
     </div>
   </div>
@@ -520,7 +555,10 @@
     <p class="cfg-errbox hidden" id="cfgSaveErr"></p>
 
     <div class="cfg-foot">
-      <span class="cfg-foot-note">改动只保存在这台电脑</span>
+      <div class="cfg-foot-left">
+        <button class="cfg-shutdown" id="btnShutdown" type="button">停止服务</button>
+        <span class="cfg-foot-note">改动只保存在这台电脑</span>
+      </div>
       <div class="cfg-acts">
         <button class="ghost" id="btnCancel">取消</button>
         <button class="btn-primary" id="btnSaveCfg">保存</button>

@@ -317,6 +317,7 @@ html[data-theme="dark"] .tx-mode { color: #e6bd8d; border-color: rgba(224, 176, 
 .seg .t { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; padding-top: 3px; }
 .seg .x { font-size: 15px; line-height: 1.66; color: var(--ink); word-break: break-word; }
 .seg .x.pending { color: var(--faint); }
+.seg .x.waiting { color: #8a6226; font-size: 13px; }
 .seg .x.error { color: var(--red); font-size: 13px; }
 .seg .tr { font-size: 13px; color: var(--muted); line-height: 1.6; margin-top: 3px; word-break: break-word; }
 .seg .x .tone {
@@ -785,6 +786,107 @@ html[data-theme="dark"] .tx-mode { color: #e6bd8d; border-color: rgba(224, 176, 
   font-size: 12.5px;
   line-height: 1.6;
 }
+
+/* 顶部未整理草稿条：打开页面就能看见，能直接整理或接着录 */
+.draft-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px 7px 12px;
+  border: 1px solid rgba(176, 132, 60, .38);
+  border-radius: var(--radius-sm);
+  background: rgba(250, 244, 228, .9);
+  color: #7a5528;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.draft-bar .db-dot {
+  flex: 0 0 auto;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #bd8a3f;
+}
+.draft-bar .db-text { flex: 1 1 auto; min-width: 0; }
+.draft-bar .db-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.draft-bar .db-btn {
+  height: 26px; padding: 0 10px; border-radius: 7px;
+  border: 1px solid rgba(150, 110, 50, .35);
+  background: rgba(255, 255, 255, .65);
+  color: #7a5528; font-size: 11.5px;
+}
+.draft-bar .db-btn:hover { background: #fff; }
+.draft-bar .db-btn.primary {
+  background: #9b6c2f; border-color: #9b6c2f; color: #fff;
+}
+.draft-bar .db-btn.primary:hover { background: #875d26; }
+.draft-bar.is-job {
+  border-color: rgba(31, 127, 181, .3);
+  background: rgba(31, 127, 181, .07);
+  color: var(--khaki);
+}
+.draft-bar.is-job .db-dot { background: var(--khaki); }
+
+/* 开始前确认：续录 / 后台整理 / 清理 */
+.resume-box { width: 470px; max-width: calc(100vw - 40px); }
+.resume-body { padding: 12px 18px 4px; }
+.resume-note { margin: 0 0 6px; color: var(--muted); font-size: 12px; line-height: 1.75; }
+.resume-error { margin: 4px 0 0; color: var(--red); font-size: 12px; line-height: 1.6; }
+.resume-acts { flex-wrap: wrap; justify-content: flex-end; }
+.resume-acts .btn-primary,
+.resume-acts .btn-secondary,
+.resume-acts .btn-danger { height: 34px; padding: 0 13px; border-radius: 9px; font-size: 12.5px; }
+.btn-secondary {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+.btn-secondary:hover:not(:disabled) { border-color: var(--control); background: #fff; }
+.btn-danger {
+  background: rgba(192, 80, 63, .08);
+  border: 1px solid rgba(192, 80, 63, .32);
+  color: #a23f30;
+}
+.btn-danger:hover:not(:disabled) { background: rgba(192, 80, 63, .14); }
+.resume-acts button:disabled { opacity: .55; cursor: not-allowed; }
+
+/* 底部后台任务状态 */
+.bg-job-status {
+  color: var(--khaki);
+  font-size: 11.5px;
+  margin-left: auto;
+}
+.bg-job-status.ok { color: var(--green); }
+.bg-job-status.busy::before {
+  content: "";
+  display: inline-block;
+  width: 6px; height: 6px; margin-right: 6px;
+  border-radius: 50%;
+  background: var(--khaki);
+  animation: saPulse 1.2s ease-in-out infinite;
+}
+
+html[data-theme="dark"] .draft-bar {
+  background: rgba(58, 47, 30, .92);
+  border-color: rgba(200, 160, 90, .3);
+  color: #e8c893;
+}
+html[data-theme="dark"] .draft-bar .db-btn {
+  background: rgba(255, 255, 255, .06);
+  border-color: rgba(200, 160, 90, .28);
+  color: #e8c893;
+}
+html[data-theme="dark"] .draft-bar .db-btn.primary {
+  background: #a97936; border-color: #a97936; color: #20180d;
+}
+html[data-theme="dark"] .draft-bar.is-job {
+  background: rgba(22, 40, 54, .94);
+  border-color: rgba(90, 160, 205, .3);
+  color: #a9d3ec;
+}
+html[data-theme="dark"] .resume-box { background: #1d242c; }
+html[data-theme="dark"] .btn-secondary { background: #252e38; border-color: #3a4552; color: #e7ecf2; }
+html[data-theme="dark"] .btn-secondary:hover:not(:disabled) { background: #2e3944; }
+html[data-theme="dark"] .btn-danger { background: rgba(192, 80, 63, .16); border-color: rgba(220, 110, 90, .38); color: #f0b1a4; }
 
 .jump-bottom {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px;
@@ -3089,6 +3191,26 @@ html[data-theme="dark"] .camera-panel .cp-empty-sub { color: #7c8899; }
   background: var(--panel);
 }
 .cfg-foot-note { font-size: 10.5px; color: var(--faint); }
+.cfg-foot-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.cfg-shutdown {
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  color: var(--red);
+  background: none;
+  border: 1px solid transparent;
+  padding: 5px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.cfg-shutdown:hover:not(:disabled) { background: rgba(192, 80, 63, .09); border-color: rgba(192, 80, 63, .28); }
+.cfg-shutdown:disabled { opacity: .5; cursor: not-allowed; }
+html[data-theme="dark"] .cfg-shutdown:hover:not(:disabled) { background: rgba(230, 120, 100, .14); }
+
+/* 服务已停止：主操作区明显变灰，避免继续点一个死服务 */
+body.service-stopped .btn-main,
+body.service-stopped .btn-pause,
+body.service-stopped #btnNotes { filter: grayscale(.6); opacity: .5; }
 .cfg-acts { display: flex; gap: 8px; }
 .cfg-acts .btn-primary { min-width: 76px; height: 34px; }
 .cfg-acts .ghost { height: 34px; padding: 0 14px; }
