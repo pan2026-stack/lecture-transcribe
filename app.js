@@ -198,6 +198,7 @@
   let currentLang = 'zh';
 
   // 会话与降级状态
+  let dirty = false;                 // 当前页面上的内容有没有存过
   let sessionId = 'S' + Date.now();
   let mode = 'live';          // live=边听边识别，deferred=只存盘，结束后统一识别
   let failStreak = 0;
@@ -1302,6 +1303,7 @@
     }
       rec.text = text;
       segments.push(rec);
+      dirty = true;
       scheduleSpeakers();
       if (running && Math.random() < 0.12) flashEmotion('10', '16', 1600);
       persistSession();
@@ -1745,6 +1747,17 @@
   async function start() {
     if (running || startPending) { return; }
     if (!sessionTitle) { openCourseModal(); return; }
+
+    // 上一段还没保存就点开始：先把转写稿存下来，存不了就不清屏
+    if (dirty && segments.some((x) => (x.text || '').trim())) {
+      setModeText('先保存上一段…', 'busy');
+      const ok = await saveSession();
+      if (!ok) {
+        setModeText('上一段没保存', 'warn');
+        showBanner('刚才那节课还没保存成功，先别开始新的；确认服务正常后点「生成」或在「处理」里重试。');
+        return;
+      }
+    }
     setView('log');
     setModeText('启动中…', 'busy');   // 一点下去就该看到变化，用来判断点击有没有被接住
     startPending = true;
@@ -1872,6 +1885,7 @@
     btnRecover.classList.add('hidden');
     btnBackfill.classList.add('hidden');
     elTranscript.innerHTML = '';
+    dirty = false;
     clearStored();
     resetShots();                       // 新的一节课，截图重新计数
     const badge = $('txMode');
@@ -2163,6 +2177,7 @@
       });
       const data = await res.json();
       if (data.path) {
+        dirty = false;
         elSaved.textContent = `已保存：${data.path}`;
         elSaved.classList.remove('hidden');
         elFoot.textContent = notesReady ? '转写稿已存好，接着整理讲稿和笔记…' : '转写稿已存到工作区。';
@@ -2370,6 +2385,12 @@
       .slice().sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     if (!usable.length) { showBanner('还没有转写内容。'); return; }
 
+    // 手动点「生成」时页面上的稿子可能还没落盘，先存一份，避免之后点开始就丢
+    if (dirty) {
+      try { await refreshSpeakers(); } catch (_) {}
+      await saveSession();
+    }
+
     hideBanner();
     lastNotes = '';
     lastArticle = '';
@@ -2392,7 +2413,9 @@
       const data = await requestNotes({
         title: `课堂 ${new Date().toLocaleDateString('zh-CN')}`,
         duration: durationText(),
-        segments: usable.map((seg) => ({ time: seg.time, text: seg.text })),
+        segments: usable.map((seg) => ({
+          time: seg.time, text: seg.text, spk: spkLabels[String(seg.seq)] || 0,
+        })),
         shots: shots.map((x) => ({ sec: x.sec, name: x.name })),
       }, null, job);
       const res = { ok: true, status: 200 };
@@ -4670,8 +4693,10 @@
         });
       });
       spkLabels = { 1: 1, 2: 1, 3: 2, 4: 2 };
+      dirty = true;                     // 演示内容当作“还没存过”
       paintSpeakers();
       updateStats();
+      syncNotesButton();
     }, 500);
   }
 

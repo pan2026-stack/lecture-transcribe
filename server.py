@@ -843,18 +843,22 @@ def write_note_file(
             if not target_dir.is_dir():
                 raise FileNotFoundError(f"目录不存在：{target_dir}")
             path = target_dir / f"{stem}.md"
+            # 先把同标题的旧文件挪进 99-归档，再写新的；
+            # 以前这里是直接删，一旦重名就把旧笔记弄丢了。
+            try:
+                _archive_old_notes(cfg, label, title, path)
+            except Exception as exc:              # 归档失败不能挡住写新文件
+                print(f"[warn] 归档旧笔记失败：{exc}", file=sys.stderr)
             tmp = path.with_suffix(".md.part")
             try:
                 tmp.write_text(body, encoding="utf-8")
-                os.replace(tmp, path)          # 先落盘成功，再清旧文件，避免写失败把旧笔记删了
+                os.replace(tmp, path)
             finally:
                 if tmp.exists():
                     try:
                         tmp.unlink()
                     except OSError:
                         pass
-            _purge_old_notes(target_dir, label, title, keep=path)
-            _archive_old_notes(cfg, label, title, path)
             return path, "obsidian"
         except OSError as exc:
             print(f"[warn] 写入 Obsidian 收件箱失败（{exc}），改存 sessions/", file=sys.stderr)
