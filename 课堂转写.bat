@@ -15,10 +15,15 @@ echo.
 
 if not exist "%APP%\server.py" goto :nodir
 
+rem 优先用安装包自带的 python：系统里那个 python 可能只是微软商店的占位程序，
+rem 一运行就退出 9009，看起来像程序坏了。
 set "PY="
-where python >nul 2>nul && set "PY=python"
-if not defined PY where py >nul 2>nul && set "PY=py -3"
+set "PYARGS="
+if exist "%APP%\python\python.exe" set "PY=%APP%\python\python.exe"
+if not defined PY for %%p in (python.exe) do if not defined PY if exist "%%~$PATH:p" set "PY=%%~$PATH:p"
+if not defined PY where py >nul 2>nul && set "PY=py" & set "PYARGS=-3"
 if not defined PY goto :nopy
+echo %PY% | find /i "WindowsApps" >nul && goto :nopy
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "if(Test-NetConnection 127.0.0.1 -Port %PORT% -InformationLevel Quiet -WarningAction SilentlyContinue){exit 0}else{exit 1}"
 if errorlevel 1 goto :notrunning
@@ -46,13 +51,24 @@ echo   （这个窗口别关，关了就等于停止服务）
 echo.
 start "" /min powershell -NoProfile -Command "Start-Sleep -Seconds 2; Start-Process '%URL%'"
 cd /d "%APP%"
-%PY% server.py
+"%PY%" %PYARGS% server.py
 set "CODE=%ERRORLEVEL%"
 
 echo.
 if "%CODE%"=="0" goto :stopped
 echo   [服务异常退出] 退出码 %CODE%
+if "%CODE%"=="9009" (
+    echo   9009 的意思是系统里找不到 python 命令。
+    echo   这个安装包本该自带 python，请确认安装目录下有 python\python.exe；
+    echo   没有的话多半被杀毒软件删了，重新安装一次即可。
+)
 echo   如果是端口被占，先运行「停止服务.bat」再试。
+if exist "%APP%\logs\server.log" (
+    echo.
+    echo   ---- server.log 最后 12 行 ----
+    powershell -NoProfile -Command "Get-Content -LiteralPath '%APP%\logs\server.log' -Tail 12 -ErrorAction SilentlyContinue"
+    echo   ----------------------------
+)
 echo.
 choice /c RQ /n /m "   按 R 重新启动，按 Q 退出："
 if errorlevel 2 goto :end
@@ -69,7 +85,11 @@ echo   程序可能被移动或删除了。
 goto :end
 
 :nopy
-echo   [错误] 没找到 Python，请先安装 Python 3 并加到 PATH。
+echo   [错误] 找不到可用的 Python。
+echo   这个安装包应该自带 python，请检查安装目录下有没有：
+echo   %APP%\python\python.exe
+echo   没有的话多半是被杀毒软件删了，重新安装一次即可。
+goto :end
 
 :end
 echo.
